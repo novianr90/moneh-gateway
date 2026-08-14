@@ -6,16 +6,19 @@ export const healthRoutes: FastifyPluginAsync = async (fastify) => {
 		return { status: 'ok', service: 'moneh-gateway', timestamp: new Date().toISOString() };
 	};
 
+	const configHandler = async () => {
+		return {
+			useActual: config.useActual,
+			version: '1.0.0'
+		};
+	};
+
 	// Support all standard healthcheck endpoints
 	fastify.get('/', healthHandler);
 	fastify.get('/health', healthHandler);
 	fastify.get('/api/health', healthHandler);
 
-	// Gateway configuration endpoint (feature flags and runtime config)
-	fastify.get('/api/config', async () => {
-		return {
-			useActual: config.useActual,
-			version: '1.0.0'
-		};
-	});
+	// Gateway configuration endpoints (support both /config and /api/config)
+	fastify.get('/config', configHandler);
+	fastify.get('/api/config', configHandler);
 };
