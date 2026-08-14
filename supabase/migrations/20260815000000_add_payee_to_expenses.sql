@@ -34,17 +34,22 @@ SELECT
 FROM public.expenses e
 LEFT JOIN public.categories c ON e.category_id = c.id;
 
--- Recreate RPC function depending on recent_expenses view
-CREATE OR REPLACE FUNCTION public.get_recent_transactions(p_limit INT DEFAULT 10)
+-- Recreate RPC function depending on recent_expenses view using plpgsql
+CREATE OR REPLACE FUNCTION public.get_recent_transactions(p_limit integer DEFAULT 10)
 RETURNS SETOF public.recent_expenses
-LANGUAGE sql SECURITY INVOKER AS $$
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    RETURN QUERY
     SELECT *
     FROM public.recent_expenses
     WHERE user_id = auth.uid()
     ORDER BY expense_date DESC, id DESC
     LIMIT p_limit;
+END;
 $$;
 
 -- Grant permissions to authenticated users
 GRANT SELECT ON public.recent_expenses TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_recent_transactions(INT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_recent_transactions(integer) TO authenticated;
