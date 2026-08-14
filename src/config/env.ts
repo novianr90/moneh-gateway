@@ -8,6 +8,7 @@ export const config = {
 	supabasePublishableKey: process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.PUBLIC_SUPABASE_ANON_KEY || 'placeholder',
 	supabaseAnonKey: process.env.PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.PUBLIC_SUPABASE_ANON_KEY || 'placeholder',
 	clientOrigin: (process.env.CLIENT_ORIGIN || 'http://localhost:3004,http://localhost:5173,https://tracker.novianlabs.my.id').split(','),
+	cookieDomain: process.env.COOKIE_DOMAIN || undefined,
 
 	// Feature Flag: Enable/Disable Actual Budget Integration
 	useActual: process.env.USE_ACTUAL === 'true',

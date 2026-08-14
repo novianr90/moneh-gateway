@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { authService } from '../services/auth.service.js';
+import { config } from '../config/env.js';
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
 	// Login endpoint
@@ -12,16 +13,23 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 		try {
 			const data = await authService.signIn(email, password);
 			if (data.session) {
+				const isProduction = process.env.NODE_ENV === 'production';
+				const cookieDomain = config.cookieDomain;
+
 				reply.setCookie('sb-access-token', data.session.access_token, {
 					path: '/',
 					httpOnly: true,
-					sameSite: 'lax',
+					secure: isProduction,
+					sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+					domain: cookieDomain,
 					maxAge: data.session.expires_in
 				});
 				reply.setCookie('sb-refresh-token', data.session.refresh_token, {
 					path: '/',
 					httpOnly: true,
-					sameSite: 'lax',
+					secure: isProduction,
+					sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+					domain: cookieDomain,
 					maxAge: 60 * 60 * 24 * 30
 				});
 			}
@@ -42,8 +50,19 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 			// Ignore signout error if session already expired
 		}
 
-		reply.clearCookie('sb-access-token', { path: '/' });
-		reply.clearCookie('sb-refresh-token', { path: '/' });
+		const isProduction = process.env.NODE_ENV === 'production';
+		const cookieDomain = config.cookieDomain;
+
+		const clearOptions = {
+			path: '/',
+			httpOnly: true,
+			secure: isProduction,
+			sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+			domain: cookieDomain
+		};
+
+		reply.clearCookie('sb-access-token', clearOptions);
+		reply.clearCookie('sb-refresh-token', clearOptions);
 		return reply.send({ message: 'Signed out successfully' });
 	});
 
