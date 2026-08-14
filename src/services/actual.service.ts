@@ -208,8 +208,8 @@ class ActualService {
 			input.idempotency_key
 		);
 
-		// In Actual Budget, expense outflows are negative integer currency amounts
-		const outflowAmount = -Math.abs(Math.round(input.amount));
+		// In Actual Budget, amounts are stored as integers where 100 = 1.00 unit.
+		const outflowAmount = -Math.abs(Math.round(input.amount * 100));
 
 		const transactionPayload = {
 			account: accountId,
