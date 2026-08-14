@@ -16,8 +16,8 @@ RUN npm prune --production
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-# Install curl for Coolify Healthcheck & libc6-compat for native sqlite bindings
-RUN apk add --no-cache curl libc6-compat
+# Install curl, wget for Coolify Healthcheck & libc6-compat for native sqlite bindings
+RUN apk add --no-cache curl wget libc6-compat
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
