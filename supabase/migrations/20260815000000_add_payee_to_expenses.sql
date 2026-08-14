@@ -5,8 +5,10 @@ ADD COLUMN IF NOT EXISTS payee TEXT;
 -- Create index on payee for fast autocomplete & filtering
 CREATE INDEX IF NOT EXISTS idx_expenses_payee ON public.expenses(user_id, payee);
 
--- Update recent_expenses view to include payee column
-DROP VIEW IF EXISTS public.recent_expenses;
+-- Drop recent_expenses view with cascade to handle dependent functions
+DROP VIEW IF EXISTS public.recent_expenses CASCADE;
+
+-- Recreate recent_expenses view with security_invoker = true
 CREATE VIEW public.recent_expenses WITH (security_invoker = true) AS
 SELECT 
     e.id,
@@ -32,5 +34,17 @@ SELECT
 FROM public.expenses e
 LEFT JOIN public.categories c ON e.category_id = c.id;
 
+-- Recreate RPC function depending on recent_expenses view
+CREATE OR REPLACE FUNCTION public.get_recent_transactions(p_limit INT DEFAULT 10)
+RETURNS SETOF public.recent_expenses
+LANGUAGE sql SECURITY INVOKER AS $$
+    SELECT *
+    FROM public.recent_expenses
+    WHERE user_id = auth.uid()
+    ORDER BY expense_date DESC, id DESC
+    LIMIT p_limit;
+$$;
+
 -- Grant permissions to authenticated users
 GRANT SELECT ON public.recent_expenses TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_recent_transactions(INT) TO authenticated;
