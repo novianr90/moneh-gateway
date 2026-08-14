@@ -63,6 +63,8 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 
 		reply.clearCookie('sb-access-token', clearOptions);
 		reply.clearCookie('sb-refresh-token', clearOptions);
+		reply.clearCookie('sb-access-token', { path: '/' });
+		reply.clearCookie('sb-refresh-token', { path: '/' });
 		return reply.send({ message: 'Signed out successfully' });
 	});
 
