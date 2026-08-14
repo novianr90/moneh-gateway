@@ -2,10 +2,13 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 
+# Ensure devDependencies (TypeScript) are installed during build stage
+ENV NODE_ENV=development
+
 COPY package*.json tsconfig.json ./
 # Mount BuildKit cache for npm store to speed up rebuilds
 RUN --mount=type=cache,target=/root/.npm \
-    npm install
+    npm install --include=dev
 
 COPY src ./src
 
