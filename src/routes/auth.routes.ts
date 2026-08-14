@@ -51,20 +51,26 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 		}
 
 		const isProduction = process.env.NODE_ENV === 'production';
-		const cookieDomain = config.cookieDomain;
+		const domains = [config.cookieDomain, '.novianlabs.my.id', undefined];
 
-		const clearOptions = {
-			path: '/',
-			httpOnly: true,
-			secure: isProduction,
-			sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
-			domain: cookieDomain
-		};
-
-		reply.clearCookie('sb-access-token', clearOptions);
-		reply.clearCookie('sb-refresh-token', clearOptions);
-		reply.clearCookie('sb-access-token', { path: '/' });
-		reply.clearCookie('sb-refresh-token', { path: '/' });
+		for (const domain of domains) {
+			reply.clearCookie('sb-access-token', {
+				path: '/',
+				httpOnly: true,
+				secure: isProduction,
+				sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+				domain: domain || undefined
+			});
+			reply.clearCookie('sb-refresh-token', {
+				path: '/',
+				httpOnly: true,
+				secure: isProduction,
+				sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+				domain: domain || undefined
+			});
+			reply.clearCookie('sb-access-token', { path: '/', domain: domain || undefined });
+			reply.clearCookie('sb-refresh-token', { path: '/', domain: domain || undefined });
+		}
 		return reply.send({ message: 'Signed out successfully' });
 	});
 
