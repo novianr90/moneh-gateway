@@ -1,0 +1,557 @@
+import type { SupabaseClient, User } from '@supabase/supabase-js';
+import type { Database } from '../lib/types/database.types.js';
+import { actualService } from './actual.service.js';
+import { config } from '../config/env.js';
+
+export type Expense = Database['public']['Tables']['expenses']['Row'];
+export type InsertExpense = Database['public']['Tables']['expenses']['Insert'];
+export type UpdateExpense = Database['public']['Tables']['expenses']['Update'];
+export type RecentExpenseView = Database['public']['Views']['recent_expenses']['Row'];
+
+export interface MonthlySummary {
+	total_amount: number;
+	transaction_count: number;
+	prev_month_total: number;
+}
+
+export interface CategoryBreakdown {
+	category_id: string;
+	category_name: string;
+	color: string;
+	icon: string;
+	total_amount: number;
+}
+
+export interface DailyTrendPoint {
+	expense_date: string;
+	daily_total: number;
+	cumulative_total: number;
+}
+
+export interface ExpenseFilters {
+	startDate?: string;
+	endDate?: string;
+	categoryId?: string;
+	paymentMethod?: string;
+	searchKey?: string;
+	page?: number;
+	pageSize?: number;
+}
+
+export interface PaginatedExpenses {
+	data: RecentExpenseView[];
+	totalCount: number;
+	page: number;
+	pageSize: number;
+	totalPages: number;
+}
+
+export interface ExpenseOperationResult {
+	expense: Expense;
+	statusCode: 200 | 201 | 202 | 409;
+	message?: string;
+	cached?: boolean;
+}
+
+export const expenseService = {
+	async getExpenses(
+		client: SupabaseClient<Database>,
+		user: User,
+		filters?: ExpenseFilters
+	): Promise<PaginatedExpenses> {
+		const page = filters?.page && filters.page > 0 ? filters.page : 1;
+		const pageSize = filters?.pageSize && filters.pageSize > 0 ? filters.pageSize : 25;
+		const from = (page - 1) * pageSize;
+		const to = from + pageSize - 1;
+
+		let query = (client
+			.from('recent_expenses') as any)
+			.select('*', { count: 'exact' })
+			.eq('user_id', user.id)
+			.order('expense_date', { ascending: false });
+
+		if (filters?.startDate) {
+			query = query.gte('expense_date', filters.startDate);
+		}
+		if (filters?.endDate) {
+			query = query.lte('expense_date', filters.endDate);
+		}
+		if (filters?.categoryId) {
+			query = query.eq('category_name', filters.categoryId);
+		}
+		if (filters?.paymentMethod) {
+			query = query.eq('payment_method', filters.paymentMethod);
+		}
+		if (filters?.searchKey) {
+			query = query.ilike('description', `%${filters.searchKey}%`);
+		}
+
+		query = query.range(from, to);
+
+		const { data, error, count } = await query;
+		if (error) throw error;
+
+		const totalCount = count || 0;
+		const totalPages = Math.ceil(totalCount / pageSize) || 1;
+
+		return {
+			data: data || [],
+			totalCount,
+			page,
+			pageSize,
+			totalPages
+		};
+	},
+
+	/**
+	 * Saga Dual-Write Expense Creation Flow (§6.2)
+	 */
+	async createExpense(
+		client: SupabaseClient<Database>,
+		user: User,
+		payload: Omit<InsertExpense, 'user_id'>,
+		idempotencyKeyInput?: string
+	): Promise<ExpenseOperationResult> {
+		if (payload.amount <= 0) {
+			throw new Error('EXP002: Expense amount must be greater than 0');
+		}
+
+		const idempotencyKey = idempotencyKeyInput?.trim() || `moneh-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+		// ==========================================
+		// Phase 0: Idempotency Check (§6.1)
+		// ==========================================
+		const { data: existing } = await (client
+			.from('expenses') as any)
+			.select('*')
+			.eq('idempotency_key', idempotencyKey)
+			.maybeSingle();
+
+		if (existing) {
+			if (existing.sync_status === 'SYNCED') {
+				return {
+					expense: existing,
+					statusCode: 201,
+					cached: true,
+					message: 'Cached response (already synced)'
+				};
+			}
+
+			if (['PENDING', 'RECONCILIATION_REQUIRED', 'ROLLBACK_PENDING'].includes(existing.sync_status)) {
+				return {
+					expense: existing,
+					statusCode: 409,
+					message: `Operation currently in progress (status: ${existing.sync_status})`
+				};
+			}
+
+			if (existing.sync_status === 'SYNC_FAILED') {
+				if (existing.sync_failure_type === 'DEFINITE_FAILURE') {
+					// Safe partial retry
+					return await this.retryDefiniteFailure(client, existing);
+				} else {
+					// RECONCILIATION_EXHAUSTED -> must route to reconciliation
+					const { data: updated } = await (client
+						.from('expenses') as any)
+						.update({
+							sync_status: 'RECONCILIATION_REQUIRED',
+							sync_failure_type: null,
+							sync_error: null,
+							updated_at: new Date().toISOString()
+						})
+						.eq('id', existing.id)
+						.select()
+						.single();
+
+					return {
+						expense: updated || existing,
+						statusCode: 202,
+						message: 'Reconciliation required before retry'
+					};
+				}
+			}
+		}
+
+		// If Actual Budget integration is disabled via feature flag (USE_ACTUAL=false)
+		if (!config.useActual) {
+			const { data: insertedExpense, error: insertError } = await (client
+				.from('expenses') as any)
+				.insert({
+					...payload,
+					user_id: user.id,
+					sync_status: 'PENDING',
+					is_upload: payload.is_upload || 'N',
+					idempotency_key: idempotencyKey
+				})
+				.select()
+				.single();
+
+			if (insertError) {
+				throw new Error(`DB001: Failed to create expense record in Supabase: ${insertError.message}`);
+			}
+
+			return {
+				expense: insertedExpense,
+				statusCode: 201
+			};
+		}
+
+		// ==========================================
+		// Phase 1: Payee Master-Data Resolution (§6.2 Phase 1)
+		// ==========================================
+		const payeeName = (payload.description || 'General').trim();
+		try {
+			await actualService.resolveOrCreatePayee(payeeName);
+		} catch (payeeErr: any) {
+			throw new Error(`ACT004: Payee master-data resolution failed: ${payeeErr.message}`);
+		}
+
+		// ==========================================
+		// Phase 2: Operational Store Record Creation (§6.2 Phase 2)
+		// ==========================================
+		const { data: insertedExpense, error: insertError } = await (client
+			.from('expenses') as any)
+			.insert({
+				...payload,
+				user_id: user.id,
+				sync_status: 'PENDING',
+				is_upload: payload.is_upload || 'N',
+				idempotency_key: idempotencyKey
+			})
+			.select()
+			.single();
+
+		if (insertError) {
+			throw new Error(`DB001: Failed to create expense record in Supabase: ${insertError.message}`);
+		}
+
+		// Fetch Category Name if category_id provided
+		let categoryName: string | undefined = undefined;
+		if (insertedExpense.category_id) {
+			const { data: catData } = await (client
+				.from('categories') as any)
+				.select('name')
+				.eq('id', insertedExpense.category_id)
+				.maybeSingle();
+			categoryName = catData?.name;
+		}
+
+		// ==========================================
+		// Phase 3: Financial System of Record Write (§6.2 Phase 3)
+		// ==========================================
+		try {
+			const txResult = await actualService.createTransaction({
+				expense_id: insertedExpense.id,
+				idempotency_key: idempotencyKey,
+				account_name: insertedExpense.payment_method || 'Cash',
+				payee_name: payeeName,
+				category_name: categoryName,
+				amount: insertedExpense.amount,
+				expense_date: insertedExpense.expense_date
+			});
+
+			// Option A: Definite Success
+			const { data: syncedRecord, error: updateError } = await (client
+				.from('expenses') as any)
+				.update({
+					actual_transaction_id: txResult.actual_transaction_id,
+					sync_status: 'SYNCED',
+					synced_at: new Date().toISOString(),
+					sync_error: null,
+					sync_failure_type: null,
+					updated_at: new Date().toISOString()
+				})
+				.eq('id', insertedExpense.id)
+				.select()
+				.single();
+
+			if (updateError || !syncedRecord) {
+				return {
+					expense: insertedExpense,
+					statusCode: 202,
+					message: 'Actual Budget transaction created; Supabase state update pending reconciliation'
+				};
+			}
+
+			return {
+				expense: syncedRecord,
+				statusCode: 201
+			};
+		} catch (actualErr: any) {
+			const errMsg = actualErr.message || 'Unknown Actual Budget error';
+			const isDefinite = errMsg.includes('ACT002') || errMsg.includes('ACT003') || errMsg.includes('validation') || errMsg.includes('400');
+
+			if (isDefinite) {
+				// Option B: Definite Failure Compensation (§6.4)
+				await (client
+					.from('expenses') as any)
+					.update({
+						sync_status: 'ROLLBACK_PENDING',
+						sync_error: errMsg,
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', insertedExpense.id);
+
+				const { data: failedRecord } = await (client
+					.from('expenses') as any)
+					.update({
+						sync_status: 'SYNC_FAILED',
+						sync_failure_type: 'DEFINITE_FAILURE',
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', insertedExpense.id)
+					.select()
+					.single();
+
+				throw new Error(`ACT005: Actual Budget rejected transaction: ${errMsg}`);
+			} else {
+				// Option C: Ambiguous Failure / Timeout (§7.1)
+				const { data: ambiguousRecord } = await (client
+					.from('expenses') as any)
+					.update({
+						sync_status: 'RECONCILIATION_REQUIRED',
+						sync_error: `Ambiguous failure/timeout: ${errMsg}`,
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', insertedExpense.id)
+					.select()
+					.single();
+
+				return {
+					expense: ambiguousRecord || insertedExpense,
+					statusCode: 202,
+					message: 'Transaction write timed out or ambiguous; queued for background reconciliation'
+				};
+			}
+		}
+	},
+
+	/**
+	 * Partial Saga Retry for DEFINITE_FAILURE (§6.3.A)
+	 */
+	async retryDefiniteFailure(client: SupabaseClient<Database>, existing: Expense): Promise<ExpenseOperationResult> {
+		// 1. Reset state to PENDING
+		await (client
+			.from('expenses') as any)
+			.update({
+				sync_status: 'PENDING',
+				sync_failure_type: null,
+				sync_error: null,
+				synced_at: null,
+				updated_at: new Date().toISOString()
+			})
+			.eq('id', existing.id);
+
+		// 2. Resolve Payee
+		const payeeName = (existing.description || 'General').trim();
+		await actualService.resolveOrCreatePayee(payeeName);
+
+		// Resolve category name
+		let categoryName: string | undefined = undefined;
+		if (existing.category_id) {
+			const { data: catData } = await (client
+				.from('categories') as any)
+				.select('name')
+				.eq('id', existing.category_id)
+				.maybeSingle();
+			categoryName = catData?.name;
+		}
+
+		// 3. Write to Actual Budget
+		try {
+			const txResult = await actualService.createTransaction({
+				expense_id: existing.id,
+				idempotency_key: existing.idempotency_key || `moneh-${existing.id}`,
+				account_name: existing.payment_method || 'Cash',
+				payee_name: payeeName,
+				category_name: categoryName,
+				amount: existing.amount,
+				expense_date: existing.expense_date
+			});
+
+			const { data: syncedRecord } = await (client
+				.from('expenses') as any)
+				.update({
+					actual_transaction_id: txResult.actual_transaction_id,
+					sync_status: 'SYNCED',
+					synced_at: new Date().toISOString(),
+					sync_error: null,
+					sync_failure_type: null,
+					updated_at: new Date().toISOString()
+				})
+				.eq('id', existing.id)
+				.select()
+				.single();
+
+			return {
+				expense: syncedRecord || existing,
+				statusCode: 201
+			};
+		} catch (retryErr: any) {
+			const errMsg = retryErr.message || 'Retry write failed';
+			await (client
+				.from('expenses') as any)
+				.update({
+					sync_status: 'SYNC_FAILED',
+					sync_failure_type: 'DEFINITE_FAILURE',
+					sync_error: errMsg,
+					updated_at: new Date().toISOString()
+				})
+				.eq('id', existing.id);
+
+			throw new Error(`ACT006: Retry write rejected by Actual Budget: ${errMsg}`);
+		}
+	},
+
+	/**
+	 * Explicit retry endpoint logic for a specific expense ID.
+	 */
+	async retryExpense(client: SupabaseClient<Database>, user: User, expenseId: string): Promise<ExpenseOperationResult> {
+		if (!config.useActual) {
+			throw new Error('ACT007: Actual Budget synchronization is disabled (USE_ACTUAL=false)');
+		}
+
+		const { data: existing, error } = await (client
+			.from('expenses') as any)
+			.select('*')
+			.eq('id', expenseId)
+			.eq('user_id', user.id)
+			.maybeSingle();
+
+		if (error || !existing) {
+			throw new Error('EXP004: Expense not found');
+		}
+
+		if (existing.sync_status !== 'SYNC_FAILED') {
+			throw new Error(`EXP005: Only expenses with SYNC_FAILED status can be retried (current: ${existing.sync_status})`);
+		}
+
+		if (existing.sync_failure_type === 'DEFINITE_FAILURE') {
+			return await this.retryDefiniteFailure(client, existing);
+		} else {
+			// RECONCILIATION_EXHAUSTED -> Transition to RECONCILIATION_REQUIRED
+			const { data: updated } = await (client
+				.from('expenses') as any)
+				.update({
+					sync_status: 'RECONCILIATION_REQUIRED',
+					sync_failure_type: null,
+					sync_error: null,
+					updated_at: new Date().toISOString()
+				})
+				.eq('id', existing.id)
+				.select()
+				.single();
+
+			return {
+				expense: updated || existing,
+				statusCode: 202,
+				message: 'Reconciliation required before retry. Queued for background reconciliation.'
+			};
+		}
+	},
+
+	async updateExpense(
+		client: SupabaseClient<Database>,
+		id: string,
+		payload: UpdateExpense
+	): Promise<Expense> {
+		if (payload.amount !== undefined && payload.amount <= 0) {
+			throw new Error('EXP002: Expense amount must be greater than 0');
+		}
+
+		// Prevent editing expenses that are already synced to Google Sheets
+		const { data: existing } = await (client
+			.from('expenses') as any)
+			.select('is_upload, sync_status')
+			.eq('id', id)
+			.maybeSingle();
+
+		if (existing?.is_upload === 'Y') {
+			throw new Error('EXP003: Cannot edit an expense that has already been synced to Google Sheets');
+		}
+
+		const { data, error } = await (client
+			.from('expenses') as any)
+			.update({
+				...payload,
+				updated_at: new Date().toISOString()
+			})
+			.eq('id', id)
+			.select()
+			.single();
+
+		if (error) throw error;
+		return data;
+	},
+
+	async deleteExpense(client: SupabaseClient<Database>, id: string): Promise<void> {
+		const { error } = await (client
+			.from('expenses') as any)
+			.delete()
+			.eq('id', id);
+
+		if (error) throw error;
+	},
+
+	async getMonthlySummary(
+		client: SupabaseClient<Database>,
+		month?: string
+	): Promise<MonthlySummary> {
+		const { data, error } = await (client as any).rpc('get_monthly_summary', {
+			p_month: month
+		});
+
+		if (error) throw error;
+		if (data && data.length > 0) {
+			return {
+				total_amount: Number(data[0].total_amount),
+				transaction_count: Number(data[0].transaction_count),
+				prev_month_total: Number(data[0].prev_month_total)
+			};
+		}
+		return { total_amount: 0, transaction_count: 0, prev_month_total: 0 };
+	},
+
+	async getMonthlyCategoryBreakdown(
+		client: SupabaseClient<Database>,
+		month?: string
+	): Promise<CategoryBreakdown[]> {
+		const { data, error } = await (client as any).rpc('get_monthly_category_breakdown', {
+			p_month: month
+		});
+
+		if (error) throw error;
+		return (data || []).map((row: any) => ({
+			...row,
+			total_amount: Number(row.total_amount)
+		}));
+	},
+
+	async getRecentTransactions(
+		client: SupabaseClient<Database>,
+		limit = 10
+	): Promise<RecentExpenseView[]> {
+		const { data, error } = await (client as any).rpc('get_recent_transactions', {
+			p_limit: limit
+		});
+
+		if (error) throw error;
+		return data || [];
+	},
+
+	async getDailyExpenseTrends(
+		client: SupabaseClient<Database>,
+		month?: string
+	): Promise<DailyTrendPoint[]> {
+		const { data, error } = await (client as any).rpc('get_daily_expense_trends', {
+			p_month: month
+		});
+
+		if (error) throw error;
+		return (data || []).map((row: any) => ({
+			expense_date: row.expense_date,
+			daily_total: Number(row.daily_total),
+			cumulative_total: Number(row.cumulative_total)
+		}));
+	}
+};

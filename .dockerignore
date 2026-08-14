@@ -1,0 +1,14 @@
+node_modules
+dist
+budget-data
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+README.md
+docs
+supabase
+Dockerfile
+docker-compose.yml
+*.log

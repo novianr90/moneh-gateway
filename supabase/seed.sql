@@ -1,0 +1,2 @@
+-- Local development seed file
+-- Note: Categories will be automatically populated when user accounts are inserted into auth.users.
