@@ -159,6 +159,23 @@ class ActualService {
 	}
 
 	/**
+	 * Retrieves list of distinct payee names from Actual Budget.
+	 */
+	public async getPayees(): Promise<string[]> {
+		try {
+			await this.ensureConnected();
+			const payees: ActualPayee[] = await actualApi.getPayees();
+			return payees
+				.map((p) => p.name?.trim())
+				.filter((name) => Boolean(name))
+				.sort((a, b) => a.localeCompare(b));
+		} catch (e: any) {
+			console.warn('Could not fetch payees from Actual Budget:', e?.message);
+			return [];
+		}
+	}
+
+	/**
 	 * Resolves Category by name.
 	 */
 	public async resolveCategoryId(categoryName?: string): Promise<string | undefined> {

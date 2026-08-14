@@ -47,6 +47,7 @@ export interface Database {
           user_id: string
           category_id: string
           amount: number
+          payee: string | null
           description: string
           expense_date: string
           payment_method: string
@@ -65,6 +66,7 @@ export interface Database {
           user_id: string
           category_id: string
           amount: number
+          payee?: string | null
           description?: string
           expense_date?: string
           payment_method?: string
@@ -83,6 +85,7 @@ export interface Database {
           user_id?: string
           category_id?: string
           amount?: number
+          payee?: string | null
           description?: string
           expense_date?: string
           payment_method?: string
@@ -160,6 +163,7 @@ export interface Database {
           user_id: string
           category_id: string
           amount: number
+          payee: string | null
           description: string
           expense_date: string
           payment_method: string

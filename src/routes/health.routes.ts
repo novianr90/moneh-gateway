@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { config } from '../config/env.js';
 
 export const healthRoutes: FastifyPluginAsync = async (fastify) => {
 	const healthHandler = async () => {
@@ -9,4 +10,12 @@ export const healthRoutes: FastifyPluginAsync = async (fastify) => {
 	fastify.get('/', healthHandler);
 	fastify.get('/health', healthHandler);
 	fastify.get('/api/health', healthHandler);
+
+	// Gateway configuration endpoint (feature flags and runtime config)
+	fastify.get('/api/config', async () => {
+		return {
+			useActual: config.useActual,
+			version: '1.0.0'
+		};
+	});
 };

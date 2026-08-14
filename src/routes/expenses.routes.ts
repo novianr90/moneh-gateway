@@ -31,6 +31,25 @@ export const expenseRoutes: FastifyPluginAsync = async (fastify) => {
 			}
 		});
 
+		// Get payees list for autocomplete
+		protectedRoutes.get('/api/payees', async (request, reply) => {
+			try {
+				const payees = await expenseService.getPayees(request.supabase, request.user!);
+				return reply.send(payees);
+			} catch (err: any) {
+				return reply.code(500).send({ error: err.message });
+			}
+		});
+
+		protectedRoutes.get('/api/expenses/payees', async (request, reply) => {
+			try {
+				const payees = await expenseService.getPayees(request.supabase, request.user!);
+				return reply.send(payees);
+			} catch (err: any) {
+				return reply.code(500).send({ error: err.message });
+			}
+		});
+
 		// Get monthly summary metrics
 		protectedRoutes.get<{ Querystring: { month?: string } }>(
 			'/api/expenses/summary',

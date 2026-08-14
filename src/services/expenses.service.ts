@@ -178,6 +178,7 @@ export const expenseService = {
 				.from('expenses') as any)
 				.insert({
 					...payload,
+					payee: payload.payee ? payload.payee.trim() : null,
 					user_id: user.id,
 					sync_status: 'PENDING',
 					is_upload: payload.is_upload || 'N',
@@ -199,7 +200,7 @@ export const expenseService = {
 		// ==========================================
 		// Phase 1: Payee Master-Data Resolution (§6.2 Phase 1)
 		// ==========================================
-		const payeeName = (payload.description || 'General').trim();
+		const payeeName = (payload.payee || payload.description || 'General').trim();
 		try {
 			await actualService.resolveOrCreatePayee(payeeName);
 		} catch (payeeErr: any) {
@@ -213,6 +214,7 @@ export const expenseService = {
 			.from('expenses') as any)
 			.insert({
 				...payload,
+				payee: payload.payee ? payload.payee.trim() : null,
 				user_id: user.id,
 				sync_status: 'PENDING',
 				is_upload: payload.is_upload || 'N',
@@ -247,7 +249,8 @@ export const expenseService = {
 				payee_name: payeeName,
 				category_name: categoryName,
 				amount: insertedExpense.amount,
-				expense_date: insertedExpense.expense_date
+				expense_date: insertedExpense.expense_date,
+				notes: insertedExpense.description || undefined
 			});
 
 			// Option A: Definite Success
@@ -343,7 +346,7 @@ export const expenseService = {
 			.eq('id', existing.id);
 
 		// 2. Resolve Payee
-		const payeeName = (existing.description || 'General').trim();
+		const payeeName = (existing.payee || existing.description || 'General').trim();
 		await actualService.resolveOrCreatePayee(payeeName);
 
 		// Resolve category name
@@ -366,7 +369,8 @@ export const expenseService = {
 				payee_name: payeeName,
 				category_name: categoryName,
 				amount: existing.amount,
-				expense_date: existing.expense_date
+				expense_date: existing.expense_date,
+				notes: existing.description || undefined
 			});
 
 			const { data: syncedRecord } = await (client
@@ -553,5 +557,42 @@ export const expenseService = {
 			daily_total: Number(row.daily_total),
 			cumulative_total: Number(row.cumulative_total)
 		}));
+	},
+
+	async getPayees(client: SupabaseClient<Database>, user: User): Promise<string[]> {
+		const payeeSet = new Set<string>();
+
+		// 1. Fetch from Actual Budget if enabled
+		if (config.useActual) {
+			try {
+				const actualPayees = await actualService.getPayees();
+				actualPayees.forEach((p) => {
+					if (p && p.trim()) payeeSet.add(p.trim());
+				});
+			} catch (e: any) {
+				console.warn('Could not load payees from Actual Budget:', e?.message);
+			}
+		}
+
+		// 2. Fetch distinct payees from Supabase expenses
+		try {
+			const { data, error } = await (client
+				.from('expenses') as any)
+				.select('payee')
+				.eq('user_id', user.id)
+				.not('payee', 'is', null);
+
+			if (!error && data) {
+				data.forEach((row: { payee: string | null }) => {
+					if (row.payee && row.payee.trim()) {
+						payeeSet.add(row.payee.trim());
+					}
+				});
+			}
+		} catch (e: any) {
+			console.warn('Could not load payees from Supabase expenses:', e?.message);
+		}
+
+		return Array.from(payeeSet).sort((a, b) => a.localeCompare(b));
 	}
 };
