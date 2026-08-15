@@ -250,6 +250,48 @@ class ActualService {
 	}
 
 	/**
+	 * Updates a financial transaction in Actual Budget.
+	 */
+	public async updateTransaction(actualTxId: string, input: Partial<ActualTransactionInput>): Promise<void> {
+		await this.ensureConnected();
+
+		const payload: any = {};
+
+		if (input.account_name !== undefined) {
+			payload.account = await this.resolveAccountId(input.account_name);
+		}
+		if (input.payee_name !== undefined) {
+			payload.payee = await this.resolveOrCreatePayee(input.payee_name);
+		}
+		if (input.category_name !== undefined) {
+			payload.category = await this.resolveCategoryId(input.category_name);
+		}
+		if (input.amount !== undefined) {
+			payload.amount = -Math.abs(Math.round(input.amount * 100));
+		}
+		if (input.expense_date !== undefined) {
+			payload.date = input.expense_date;
+		}
+		if (input.notes !== undefined && input.expense_id && input.idempotency_key) {
+			payload.notes = this.formatNotes(
+				input.notes,
+				input.expense_id,
+				input.idempotency_key
+			);
+		}
+
+		await (actualApi as any).updateTransaction(actualTxId, payload);
+	}
+
+	/**
+	 * Deletes a financial transaction in Actual Budget.
+	 */
+	public async deleteTransaction(actualTxId: string): Promise<void> {
+		await this.ensureConnected();
+		await (actualApi as any).deleteTransaction(actualTxId);
+	}
+
+	/**
 	 * Searches Actual Budget transactions for reconciliation matching correlation identifiers.
 	 */
 	public async findTransactionByCorrelation(

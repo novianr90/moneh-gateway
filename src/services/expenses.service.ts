@@ -466,12 +466,39 @@ export const expenseService = {
 		// Prevent editing expenses that are already synced to Google Sheets
 		const { data: existing } = await (client
 			.from('expenses') as any)
-			.select('is_upload, sync_status')
+			.select('is_upload, sync_status, actual_transaction_id, idempotency_key')
 			.eq('id', id)
 			.maybeSingle();
 
 		if (existing?.is_upload === 'Y') {
 			throw new Error('EXP003: Cannot edit an expense that has already been synced to Google Sheets');
+		}
+
+		if (config.useActual && existing?.actual_transaction_id) {
+			try {
+				let categoryName: string | undefined = undefined;
+				if (payload.category_id) {
+					const { data: catData } = await (client
+						.from('categories') as any)
+						.select('name')
+						.eq('id', payload.category_id)
+						.maybeSingle();
+					categoryName = catData?.name;
+				}
+
+				await actualService.updateTransaction(existing.actual_transaction_id, {
+					account_name: payload.payment_method,
+					payee_name: payload.payee || payload.description || undefined,
+					category_name: categoryName,
+					amount: payload.amount,
+					expense_date: payload.expense_date,
+					notes: payload.description || undefined,
+					expense_id: id,
+					idempotency_key: existing.idempotency_key || `moneh-${id}`
+				});
+			} catch (e: any) {
+				console.warn('Failed to update transaction in Actual Budget:', e?.message);
+			}
 		}
 
 		const { data, error } = await (client
@@ -489,6 +516,22 @@ export const expenseService = {
 	},
 
 	async deleteExpense(client: SupabaseClient<Database>, id: string): Promise<void> {
+		if (config.useActual) {
+			const { data: existing } = await (client
+				.from('expenses') as any)
+				.select('actual_transaction_id')
+				.eq('id', id)
+				.maybeSingle();
+				
+			if (existing?.actual_transaction_id) {
+				try {
+					await actualService.deleteTransaction(existing.actual_transaction_id);
+				} catch (e: any) {
+					console.warn('Failed to delete transaction in Actual Budget:', e?.message);
+				}
+			}
+		}
+
 		const { error } = await (client
 			.from('expenses') as any)
 			.delete()
