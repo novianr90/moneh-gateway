@@ -30,8 +30,8 @@ export interface ActualTransactionInput {
 	account_name: string;
 	payee_name: string;
 	category_name?: string;
-	amount: number; // positive number in tracker, will be negated for outflow
-	expense_date: string; // YYYY-MM-DD
+	amount: number;
+	expense_date: string;
 	notes?: string;
 }
 
@@ -50,9 +50,6 @@ class ActualService {
 	private initialized = false;
 	private initPromise: Promise<void> | null = null;
 
-	/**
-	 * Ensure Actual Budget SDK is initialized and local budget cache is downloaded/synced.
-	 */
 	public async ensureConnected(): Promise<void> {
 		if (this.initialized) return;
 
@@ -89,9 +86,6 @@ class ActualService {
 		}
 	}
 
-	/**
-	 * Formats metadata correlation identifiers into the Actual Budget transaction notes.
-	 */
 	public formatNotes(notes: string | undefined, expenseId: string, idempotencyKey: string): string {
 		const correlationTag = `[moneh_expense_id: ${expenseId}] [moneh_idempotency_key: ${idempotencyKey}]`;
 		if (!notes || notes.trim() === '') {
@@ -100,9 +94,6 @@ class ActualService {
 		return `${notes.trim()} ${correlationTag}`;
 	}
 
-	/**
-	 * Extracts correlation keys (expense_id, idempotency_key) from notes string.
-	 */
 	public parseCorrelationNotes(notes: string | null | undefined): { expenseId?: string; idempotencyKey?: string } {
 		if (!notes) return {};
 		const expenseMatch = notes.match(/\[moneh_expense_id:\s*([^\]]+)\]/);
@@ -114,9 +105,6 @@ class ActualService {
 		};
 	}
 
-	/**
-	 * Resolves payment method name to Actual Budget account ID.
-	 */
 	public async resolveAccountId(paymentMethodName: string): Promise<string> {
 		await this.ensureConnected();
 		const accounts: ActualAccount[] = await actualApi.getAccounts();
@@ -124,7 +112,6 @@ class ActualService {
 		const targetName = (paymentMethodName || 'Cash').trim().toLowerCase();
 		let matched = accounts.find((acc) => !acc.closed && acc.name.trim().toLowerCase() === targetName);
 
-		// Fallback match (e.g. partial match or first open account)
 		if (!matched) {
 			matched = accounts.find((acc) => !acc.closed);
 		}
@@ -136,10 +123,6 @@ class ActualService {
 		return matched.id;
 	}
 
-	/**
-	 * Resolves Payee by merchant/description.
-	 * Payee creation is a durable master-data side-effect (§3.2).
-	 */
 	public async resolveOrCreatePayee(payeeName: string): Promise<string> {
 		await this.ensureConnected();
 		const trimmedName = (payeeName || 'General').trim();
@@ -153,14 +136,10 @@ class ActualService {
 			return existing.id;
 		}
 
-		// Durable side-effect: create payee in Actual Budget
 		const newPayeeId = await actualApi.createPayee({ name: trimmedName });
 		return newPayeeId;
 	}
 
-	/**
-	 * Retrieves list of distinct payee names from Actual Budget.
-	 */
 	public async getPayees(): Promise<string[]> {
 		try {
 			await this.ensureConnected();
@@ -175,9 +154,6 @@ class ActualService {
 		}
 	}
 
-	/**
-	 * Resolves Category by name.
-	 */
 	public async resolveCategoryId(categoryName?: string): Promise<string | undefined> {
 		if (!categoryName) return undefined;
 		await this.ensureConnected();
@@ -192,9 +168,6 @@ class ActualService {
 		return matched?.id;
 	}
 
-	/**
-	 * Creates a financial transaction in Actual Budget (System of Record).
-	 */
 	public async createTransaction(input: ActualTransactionInput): Promise<ActualTransactionResult> {
 		await this.ensureConnected();
 
@@ -208,7 +181,6 @@ class ActualService {
 			input.idempotency_key
 		);
 
-		// In Actual Budget, amounts are stored as integers where 100 = 1.00 unit.
 		const outflowAmount = -Math.abs(Math.round(input.amount * 100));
 
 		const transactionPayload = {
@@ -249,9 +221,6 @@ class ActualService {
 		return { actual_transaction_id: actualTxId };
 	}
 
-	/**
-	 * Updates a financial transaction in Actual Budget.
-	 */
 	public async updateTransaction(actualTxId: string, input: Partial<ActualTransactionInput>): Promise<void> {
 		await this.ensureConnected();
 
@@ -283,17 +252,11 @@ class ActualService {
 		await (actualApi as any).updateTransaction(actualTxId, payload);
 	}
 
-	/**
-	 * Deletes a financial transaction in Actual Budget.
-	 */
 	public async deleteTransaction(actualTxId: string): Promise<void> {
 		await this.ensureConnected();
 		await (actualApi as any).deleteTransaction(actualTxId);
 	}
 
-	/**
-	 * Searches Actual Budget transactions for reconciliation matching correlation identifiers.
-	 */
 	public async findTransactionByCorrelation(
 		paymentMethodName: string,
 		expenseId: string,
@@ -304,8 +267,6 @@ class ActualService {
 
 		try {
 			const accountId = await this.resolveAccountId(paymentMethodName);
-
-			// Retrieve transactions (using a time window around expense_date if available)
 			let startDate: string | undefined = undefined;
 			let endDate: string | undefined = undefined;
 
@@ -339,21 +300,18 @@ class ActualService {
 		}
 	}
 
-	/**
-	 * Imports and synchronizes Master Data (Accounts & Categories) from Actual Budget into Supabase.
-	 */
 	public async syncMasterDataToSupabase(
 		client: SupabaseClient<Database>,
 		userId: string
 	): Promise<MasterDataSyncReport> {
 		await this.ensureConnected();
 
-		// 1. Fetch Accounts from Actual Budget
+		await actualApi.downloadBudget(config.actualSyncId);
+
 		const actualAccounts: ActualAccount[] = await actualApi.getAccounts();
 		const activeAccounts = actualAccounts.filter((a) => !a.closed);
 		const activeAccountNames = new Set(activeAccounts.map((a) => a.name.trim().toLowerCase()));
 
-		// Fetch existing payment methods in Supabase
 		const { data: existingPMs } = await (client
 			.from('payment_methods') as any)
 			.select('id, name, is_active')
@@ -364,7 +322,6 @@ class ActualService {
 		);
 		const newAccounts: string[] = [];
 
-		// Activate or Insert accounts from Actual Budget
 		for (const acc of activeAccounts) {
 			const cleanName = acc.name.trim();
 			const lower = cleanName.toLowerCase();
@@ -383,7 +340,6 @@ class ActualService {
 			}
 		}
 
-		// Deactivate redundant payment methods in Supabase that are not in Actual Budget
 		for (const [lowerName, pm] of existingPMMap.entries()) {
 			if (!activeAccountNames.has(lowerName) && pm.is_active) {
 				await (client.from('payment_methods') as any)
@@ -392,12 +348,10 @@ class ActualService {
 			}
 		}
 
-		// 2. Fetch Categories from Actual Budget (exclude income categories)
 		const actualCategories: ActualCategory[] = await actualApi.getCategories();
 		const expenseCategories = actualCategories.filter((c) => !c.is_income);
 		const activeCategoryNames = new Set(expenseCategories.map((c) => c.name.trim().toLowerCase()));
 
-		// Fetch existing categories in Supabase
 		const { data: existingCats } = await (client
 			.from('categories') as any)
 			.select('id, name, is_active')
@@ -408,7 +362,6 @@ class ActualService {
 		);
 		const newCategories: string[] = [];
 
-		// Curated modern color palette for newly imported categories
 		const colorPalette = [
 			'#ef4444', '#f97316', '#f59e0b', '#10b981', '#06b6d4',
 			'#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#64748b'
@@ -438,7 +391,6 @@ class ActualService {
 			}
 		}
 
-		// Deactivate redundant categories in Supabase that are not in Actual Budget
 		for (const [lowerName, cat] of existingCatMap.entries()) {
 			if (!activeCategoryNames.has(lowerName) && cat.is_active) {
 				await (client.from('categories') as any)
@@ -455,9 +407,6 @@ class ActualService {
 		};
 	}
 
-	/**
-	 * Clean shutdown for server reload/termination.
-	 */
 	public async shutdown(): Promise<void> {
 		if (this.initialized) {
 			try {
