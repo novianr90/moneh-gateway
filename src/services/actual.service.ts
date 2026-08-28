@@ -108,7 +108,7 @@ class ActualService {
 	public async resolveAccountId(paymentMethodName: string): Promise<string> {
 		await this.ensureConnected();
 		const accounts: ActualAccount[] = await actualApi.getAccounts();
-		
+
 		const targetName = (paymentMethodName || 'Cash').trim().toLowerCase();
 		let matched = accounts.find((acc) => !acc.closed && acc.name.trim().toLowerCase() === targetName);
 
@@ -121,7 +121,34 @@ class ActualService {
 		}
 
 		return matched.id;
-	}
+  }
+
+  public async resolveTransferPayee(payeeName: string): Promise<string | undefined> {
+      await this.ensureConnected();
+
+      const targetName = (payeeName || '').trim().toLowerCase();
+      if (!targetName) return undefined;
+
+      const [accounts, payees] = await Promise.all([
+          actualApi.getAccounts(),
+          actualApi.getPayees()
+      ]);
+
+      const offBudgetAccountIds = new Set(
+          accounts
+              .filter((account) => !account.closed && account.offbudget === true)
+              .map((account) => account.id)
+      );
+
+      const transferPayee = payees.find(
+          (payee: any) =>
+              payee.transfer_acct &&
+              offBudgetAccountIds.has(payee.transfer_acct) &&
+              payee.name.trim().toLowerCase() === targetName
+      );
+
+      return transferPayee?.id;
+  }
 
 	public async resolveOrCreatePayee(payeeName: string): Promise<string> {
 		await this.ensureConnected();
@@ -157,7 +184,7 @@ class ActualService {
 	public async resolveCategoryId(categoryName?: string): Promise<string | undefined> {
 		if (!categoryName) return undefined;
 		await this.ensureConnected();
-		
+
 		const categories: ActualCategory[] = await actualApi.getCategories();
 		const targetName = categoryName.trim().toLowerCase();
 
@@ -172,7 +199,8 @@ class ActualService {
 		await this.ensureConnected();
 
 		const accountId = await this.resolveAccountId(input.account_name);
-		const payeeId = await this.resolveOrCreatePayee(input.payee_name);
+		const transferPayeeId = await this.resolveTransferPayee(input.payee_name);
+		const payeeId = transferPayeeId ?? await this.resolveOrCreatePayee(input.payee_name);
 		const categoryId = await this.resolveCategoryId(input.category_name);
 
 		const formattedNotes = this.formatNotes(
@@ -193,7 +221,14 @@ class ActualService {
 			cleared: true
 		};
 
-		const result = await actualApi.addTransactions(accountId, [transactionPayload]);
+		// Added true so if payee is account, actual do transfer to the account instead of know it as standard transactions
+    const result = await actualApi.addTransactions(
+      accountId,
+      [transactionPayload],
+      {
+        runTransfers: true
+      }
+    );
 
 		let actualTxId = '';
 		if (Array.isArray(result) && result.length > 0) {
