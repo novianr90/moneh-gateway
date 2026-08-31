@@ -1,7 +1,7 @@
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type { Database } from '../lib/types/database.types.js';
 import { actualService } from './actual.service.js';
-import { config } from '../config/env.js';
+import { userConfigService } from './userConfig.service.js';
 
 export type Expense = Database['public']['Tables']['expenses']['Row'];
 export type InsertExpense = Database['public']['Tables']['expenses']['Insert'];
@@ -51,6 +51,8 @@ export interface ExpenseOperationResult {
 	statusCode: 200 | 201 | 202 | 409;
 	message?: string;
 	cached?: boolean;
+	// Present when USE_ACTUAL=true but the user has no actual_sync_id configured yet (issue #2).
+	warning?: string;
 }
 
 export const expenseService = {
@@ -118,6 +120,10 @@ export const expenseService = {
 
 		const idempotencyKey = idempotencyKeyInput?.trim() || `moneh-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
+		// Resolved once up-front: USE_ACTUAL=false, or true but this user has no actual_sync_id
+		// configured yet (issue #2), both fall back to "disabled" behavior with an optional warning.
+		const availability = await userConfigService.resolveActualAvailability(client, user.id);
+
 		// ==========================================
 		// Phase 0: Idempotency Check (§6.1)
 		// ==========================================
@@ -148,7 +154,14 @@ export const expenseService = {
 			if (existing.sync_status === 'SYNC_FAILED') {
 				if (existing.sync_failure_type === 'DEFINITE_FAILURE') {
 					// Safe partial retry
-					return await this.retryDefiniteFailure(client, existing);
+					if (!availability.available) {
+						throw new Error(
+							availability.warning
+								? `ACT007: ${availability.warning}`
+								: 'ACT007: Actual Budget synchronization is disabled (USE_ACTUAL=false)'
+						);
+					}
+					return await this.retryDefiniteFailure(client, existing, availability.actualSyncId!);
 				} else {
 					// RECONCILIATION_EXHAUSTED -> must route to reconciliation
 					const { data: updated } = await (client
@@ -172,8 +185,10 @@ export const expenseService = {
 			}
 		}
 
-		// If Actual Budget integration is disabled via feature flag (USE_ACTUAL=false)
-		if (!config.useActual) {
+		// If Actual Budget integration is disabled (USE_ACTUAL=false), or enabled but this
+		// user has no actual_sync_id configured yet, behave like it's disabled - just surface
+		// a warning in the latter case so the client can point the user at the config page.
+		if (!availability.available) {
 			const { data: insertedExpense, error: insertError } = await (client
 				.from('expenses') as any)
 				.insert({
@@ -193,16 +208,19 @@ export const expenseService = {
 
 			return {
 				expense: insertedExpense,
-				statusCode: 201
+				statusCode: 201,
+				warning: availability.warning
 			};
 		}
+
+		const actualSyncId = availability.actualSyncId!;
 
 		// ==========================================
 		// Phase 1: Payee Master-Data Resolution (§6.2 Phase 1)
 		// ==========================================
 		const payeeName = (payload.payee || payload.description || 'General').trim();
 		try {
-			await actualService.resolveOrCreatePayee(payeeName);
+			await actualService.resolveOrCreatePayee(actualSyncId, payeeName);
 		} catch (payeeErr: any) {
 			throw new Error(`ACT004: Payee master-data resolution failed: ${payeeErr.message}`);
 		}
@@ -242,7 +260,7 @@ export const expenseService = {
 		// Phase 3: Financial System of Record Write (§6.2 Phase 3)
 		// ==========================================
 		try {
-			const txResult = await actualService.createTransaction({
+			const txResult = await actualService.createTransaction(actualSyncId, {
 				expense_id: insertedExpense.id,
 				idempotency_key: idempotencyKey,
 				account_name: insertedExpense.payment_method || 'Cash',
@@ -332,7 +350,7 @@ export const expenseService = {
 	/**
 	 * Partial Saga Retry for DEFINITE_FAILURE (§6.3.A)
 	 */
-	async retryDefiniteFailure(client: SupabaseClient<Database>, existing: Expense): Promise<ExpenseOperationResult> {
+	async retryDefiniteFailure(client: SupabaseClient<Database>, existing: Expense, actualSyncId: string): Promise<ExpenseOperationResult> {
 		// 1. Reset state to PENDING
 		await (client
 			.from('expenses') as any)
@@ -347,7 +365,7 @@ export const expenseService = {
 
 		// 2. Resolve Payee
 		const payeeName = (existing.payee || existing.description || 'General').trim();
-		await actualService.resolveOrCreatePayee(payeeName);
+		await actualService.resolveOrCreatePayee(actualSyncId, payeeName);
 
 		// Resolve category name
 		let categoryName: string | undefined = undefined;
@@ -362,7 +380,7 @@ export const expenseService = {
 
 		// 3. Write to Actual Budget
 		try {
-			const txResult = await actualService.createTransaction({
+			const txResult = await actualService.createTransaction(actualSyncId, {
 				expense_id: existing.id,
 				idempotency_key: existing.idempotency_key || `moneh-${existing.id}`,
 				account_name: existing.payment_method || 'Cash',
@@ -411,8 +429,13 @@ export const expenseService = {
 	 * Explicit retry endpoint logic for a specific expense ID.
 	 */
 	async retryExpense(client: SupabaseClient<Database>, user: User, expenseId: string): Promise<ExpenseOperationResult> {
-		if (!config.useActual) {
-			throw new Error('ACT007: Actual Budget synchronization is disabled (USE_ACTUAL=false)');
+		const availability = await userConfigService.resolveActualAvailability(client, user.id);
+		if (!availability.available) {
+			throw new Error(
+				availability.warning
+					? `ACT007: ${availability.warning}`
+					: 'ACT007: Actual Budget synchronization is disabled (USE_ACTUAL=false)'
+			);
 		}
 
 		const { data: existing, error } = await (client
@@ -431,7 +454,7 @@ export const expenseService = {
 		}
 
 		if (existing.sync_failure_type === 'DEFINITE_FAILURE') {
-			return await this.retryDefiniteFailure(client, existing);
+			return await this.retryDefiniteFailure(client, existing, availability.actualSyncId!);
 		} else {
 			// RECONCILIATION_EXHAUSTED -> Transition to RECONCILIATION_REQUIRED
 			const { data: updated } = await (client
@@ -466,7 +489,7 @@ export const expenseService = {
 		// Prevent editing expenses that are already synced to Google Sheets
 		const { data: existing } = await (client
 			.from('expenses') as any)
-			.select('is_upload, sync_status, actual_transaction_id, idempotency_key')
+			.select('user_id, is_upload, sync_status, actual_transaction_id, idempotency_key')
 			.eq('id', id)
 			.maybeSingle();
 
@@ -474,30 +497,33 @@ export const expenseService = {
 			throw new Error('EXP003: Cannot edit an expense that has already been synced to Google Sheets');
 		}
 
-		if (config.useActual && existing?.actual_transaction_id) {
-			try {
-				let categoryName: string | undefined = undefined;
-				if (payload.category_id) {
-					const { data: catData } = await (client
-						.from('categories') as any)
-						.select('name')
-						.eq('id', payload.category_id)
-						.maybeSingle();
-					categoryName = catData?.name;
-				}
+		if (existing?.actual_transaction_id) {
+			const availability = await userConfigService.resolveActualAvailability(client, existing.user_id);
+			if (availability.available) {
+				try {
+					let categoryName: string | undefined = undefined;
+					if (payload.category_id) {
+						const { data: catData } = await (client
+							.from('categories') as any)
+							.select('name')
+							.eq('id', payload.category_id)
+							.maybeSingle();
+						categoryName = catData?.name;
+					}
 
-				await actualService.updateTransaction(existing.actual_transaction_id, {
-					account_name: payload.payment_method,
-					payee_name: payload.payee || payload.description || undefined,
-					category_name: categoryName,
-					amount: payload.amount,
-					expense_date: payload.expense_date,
-					notes: payload.description || undefined,
-					expense_id: id,
-					idempotency_key: existing.idempotency_key || `moneh-${id}`
-				});
-			} catch (e: any) {
-				console.warn('Failed to update transaction in Actual Budget:', e?.message);
+					await actualService.updateTransaction(availability.actualSyncId!, existing.actual_transaction_id, {
+						account_name: payload.payment_method,
+						payee_name: payload.payee || payload.description || undefined,
+						category_name: categoryName,
+						amount: payload.amount,
+						expense_date: payload.expense_date,
+						notes: payload.description || undefined,
+						expense_id: id,
+						idempotency_key: existing.idempotency_key || `moneh-${id}`
+					});
+				} catch (e: any) {
+					console.warn('Failed to update transaction in Actual Budget:', e?.message);
+				}
 			}
 		}
 
@@ -516,16 +542,17 @@ export const expenseService = {
 	},
 
 	async deleteExpense(client: SupabaseClient<Database>, id: string): Promise<void> {
-		if (config.useActual) {
-			const { data: existing } = await (client
-				.from('expenses') as any)
-				.select('actual_transaction_id')
-				.eq('id', id)
-				.maybeSingle();
-				
-			if (existing?.actual_transaction_id) {
+		const { data: existing } = await (client
+			.from('expenses') as any)
+			.select('user_id, actual_transaction_id')
+			.eq('id', id)
+			.maybeSingle();
+
+		if (existing?.actual_transaction_id) {
+			const availability = await userConfigService.resolveActualAvailability(client, existing.user_id);
+			if (availability.available) {
 				try {
-					await actualService.deleteTransaction(existing.actual_transaction_id);
+					await actualService.deleteTransaction(availability.actualSyncId!, existing.actual_transaction_id);
 				} catch (e: any) {
 					console.warn('Failed to delete transaction in Actual Budget:', e?.message);
 				}
@@ -605,10 +632,11 @@ export const expenseService = {
 	async getPayees(client: SupabaseClient<Database>, user: User): Promise<string[]> {
 		const payeeSet = new Set<string>();
 
-		// 1. Fetch from Actual Budget if enabled
-		if (config.useActual) {
+		// 1. Fetch from Actual Budget if enabled and configured for this user
+		const availability = await userConfigService.resolveActualAvailability(client, user.id);
+		if (availability.available) {
 			try {
-				const actualPayees = await actualService.getPayees();
+				const actualPayees = await actualService.getPayees(availability.actualSyncId!);
 				actualPayees.forEach((p) => {
 					if (p && p.trim()) payeeSet.add(p.trim());
 				});
