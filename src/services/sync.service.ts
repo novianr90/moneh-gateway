@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, SyncStatus } from '../lib/types/database.types.js';
 import { reconciliationService, type ReconciliationReport } from './reconciliation.service.js';
 import { actualService, type MasterDataSyncReport } from './actual.service.js';
+import { userConfigService } from './userConfig.service.js';
 import { config } from '../config/env.js';
 
 export type SyncLog = Database['public']['Tables']['sync_logs']['Row'];
@@ -13,6 +14,7 @@ export interface ActualSyncStatusSummary {
 	reconciling: number;
 	failed: number;
 	total: number;
+	warning?: string;
 }
 
 export const syncService = {
@@ -34,18 +36,28 @@ export const syncService = {
 	},
 
 	async syncMasterData(client: SupabaseClient<Database>, userId: string): Promise<MasterDataSyncReport> {
-		return await actualService.syncMasterDataToSupabase(client, userId);
+		const availability = await userConfigService.resolveActualAvailability(client, userId);
+		if (!availability.available) {
+			throw new Error(
+				availability.warning
+					? `ACT_SYNC003: ${availability.warning}`
+					: 'ACT_SYNC003: Actual Budget integration is disabled (USE_ACTUAL=false)'
+			);
+		}
+		return await actualService.syncMasterDataToSupabase(client, userId, availability.actualSyncId!);
 	},
 
 	async getActualSyncStatus(client: SupabaseClient<Database>, userId: string): Promise<ActualSyncStatusSummary> {
-		if (!config.useActual) {
+		const availability = await userConfigService.resolveActualAvailability(client, userId);
+		if (!availability.available) {
 			return {
 				enabled: false,
 				synced: 0,
 				pending: 0,
 				reconciling: 0,
 				failed: 0,
-				total: 0
+				total: 0,
+				warning: availability.warning
 			};
 		}
 

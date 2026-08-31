@@ -14,9 +14,10 @@ export const config = {
 	useActual: process.env.USE_ACTUAL === 'true',
 
 	// Actual Budget Configuration
+	// NOTE: ACTUAL_SYNC_ID is intentionally NOT read from env anymore (see issue #2).
+	// Each user's sync id now lives in public.users_configurations, resolved per-request.
 	actualServerUrl: process.env.ACTUAL_SERVER_URL || process.env.BUDGET_URL || 'https://budget.novianlabs.my.id',
 	actualPassword: process.env.ACTUAL_PASSWORD || process.env.BUDGET_PASSWORD || '',
-	actualSyncId: process.env.ACTUAL_SYNC_ID || '',
 	actualDataDir: process.env.ACTUAL_DATA_DIR || './budget-data',
 
 	// Reconciliation Configuration
