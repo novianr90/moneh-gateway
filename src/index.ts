@@ -9,6 +9,7 @@ import { categoryRoutes } from './routes/categories.routes.js';
 import { expenseRoutes } from './routes/expenses.routes.js';
 import { paymentMethodRoutes } from './routes/paymentMethods.routes.js';
 import { syncRoutes } from './routes/sync.routes.js';
+import { userConfigRoutes } from './routes/userConfig.routes.js';
 import { reconciliationService } from './services/reconciliation.service.js';
 import { defaultSupabase } from './lib/supabase.js';
 import { actualService } from './services/actual.service.js';
@@ -37,6 +38,7 @@ async function main() {
 	await fastify.register(expenseRoutes);
 	await fastify.register(paymentMethodRoutes);
 	await fastify.register(syncRoutes);
+	await fastify.register(userConfigRoutes);
 
 	// Start Background Reconciliation Runner for Actual Budget if enabled
 	if (config.useActual) {

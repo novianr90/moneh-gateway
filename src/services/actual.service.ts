@@ -49,8 +49,13 @@ export interface MasterDataSyncReport {
 class ActualService {
 	private initialized = false;
 	private initPromise: Promise<void> | null = null;
+	// Sync id of the budget currently downloaded/active in the actual-app/api SDK session.
+	// The SDK only supports one active budget per process, so switching users means
+	// re-downloading their budget before the operation runs.
+	private activeSyncId: string | null = null;
+	private downloadPromise: Promise<void> | null = null;
 
-	public async ensureConnected(): Promise<void> {
+	private async ensureInitialized(): Promise<void> {
 		if (this.initialized) return;
 
 		if (this.initPromise) {
@@ -58,8 +63,8 @@ class ActualService {
 		}
 
 		this.initPromise = (async () => {
-			if (!config.actualServerUrl || !config.actualPassword || !config.actualSyncId) {
-				throw new Error('ACT001: Actual Budget environment configuration is missing (ACTUAL_SERVER_URL, ACTUAL_PASSWORD, ACTUAL_SYNC_ID)');
+			if (!config.actualServerUrl || !config.actualPassword) {
+				throw new Error('ACT001: Actual Budget environment configuration is missing (ACTUAL_SERVER_URL, ACTUAL_PASSWORD)');
 			}
 
 			const dataDir = path.resolve(process.cwd(), config.actualDataDir);
@@ -73,7 +78,6 @@ class ActualService {
 				password: config.actualPassword
 			});
 
-			await actualApi.downloadBudget(config.actualSyncId);
 			this.initialized = true;
 		})();
 
@@ -83,6 +87,37 @@ class ActualService {
 			this.initPromise = null;
 			this.initialized = false;
 			throw err;
+		}
+	}
+
+	/**
+	 * Ensures the SDK is initialized AND the given user's budget is the active one.
+	 * `actualSyncId` is resolved per-request from `users_configurations` (see issue #2) -
+	 * there is no longer a single gateway-wide budget.
+	 */
+	public async ensureConnected(actualSyncId: string): Promise<void> {
+		if (!actualSyncId) {
+			throw new Error('ACT001: Actual sync id is missing for this user');
+		}
+
+		await this.ensureInitialized();
+
+		if (this.activeSyncId === actualSyncId) return;
+
+		if (this.downloadPromise) {
+			await this.downloadPromise;
+			if (this.activeSyncId === actualSyncId) return;
+		}
+
+		this.downloadPromise = (async () => {
+			await actualApi.downloadBudget(actualSyncId);
+			this.activeSyncId = actualSyncId;
+		})();
+
+		try {
+			await this.downloadPromise;
+		} finally {
+			this.downloadPromise = null;
 		}
 	}
 
@@ -105,8 +140,8 @@ class ActualService {
 		};
 	}
 
-	public async resolveAccountId(paymentMethodName: string): Promise<string> {
-		await this.ensureConnected();
+	public async resolveAccountId(actualSyncId: string, paymentMethodName: string): Promise<string> {
+		await this.ensureConnected(actualSyncId);
 		const accounts: ActualAccount[] = await actualApi.getAccounts();
 
 		const targetName = (paymentMethodName || 'Cash').trim().toLowerCase();
@@ -123,8 +158,8 @@ class ActualService {
 		return matched.id;
   }
 
-  public async resolveTransferPayee(payeeName: string): Promise<string | undefined> {
-      await this.ensureConnected();
+  public async resolveTransferPayee(actualSyncId: string, payeeName: string): Promise<string | undefined> {
+      await this.ensureConnected(actualSyncId);
 
       const targetName = (payeeName || '').trim().toLowerCase();
       if (!targetName) return undefined;
@@ -150,8 +185,8 @@ class ActualService {
       return transferPayee?.id;
   }
 
-	public async resolveOrCreatePayee(payeeName: string): Promise<string> {
-		await this.ensureConnected();
+	public async resolveOrCreatePayee(actualSyncId: string, payeeName: string): Promise<string> {
+		await this.ensureConnected(actualSyncId);
 		const trimmedName = (payeeName || 'General').trim();
 		const payees: ActualPayee[] = await actualApi.getPayees();
 
@@ -167,9 +202,9 @@ class ActualService {
 		return newPayeeId;
 	}
 
-	public async getPayees(): Promise<string[]> {
+	public async getPayees(actualSyncId: string): Promise<string[]> {
 		try {
-			await this.ensureConnected();
+			await this.ensureConnected(actualSyncId);
 			const payees: ActualPayee[] = await actualApi.getPayees();
 			return payees
 				.map((p) => p.name?.trim())
@@ -181,9 +216,9 @@ class ActualService {
 		}
 	}
 
-	public async resolveCategoryId(categoryName?: string): Promise<string | undefined> {
+	public async resolveCategoryId(actualSyncId: string, categoryName?: string): Promise<string | undefined> {
 		if (!categoryName) return undefined;
-		await this.ensureConnected();
+		await this.ensureConnected(actualSyncId);
 
 		const categories: ActualCategory[] = await actualApi.getCategories();
 		const targetName = categoryName.trim().toLowerCase();
@@ -195,13 +230,13 @@ class ActualService {
 		return matched?.id;
 	}
 
-	public async createTransaction(input: ActualTransactionInput): Promise<ActualTransactionResult> {
-		await this.ensureConnected();
+	public async createTransaction(actualSyncId: string, input: ActualTransactionInput): Promise<ActualTransactionResult> {
+		await this.ensureConnected(actualSyncId);
 
-		const accountId = await this.resolveAccountId(input.account_name);
-		const transferPayeeId = await this.resolveTransferPayee(input.payee_name);
-		const payeeId = transferPayeeId ?? await this.resolveOrCreatePayee(input.payee_name);
-		const categoryId = await this.resolveCategoryId(input.category_name);
+		const accountId = await this.resolveAccountId(actualSyncId, input.account_name);
+		const transferPayeeId = await this.resolveTransferPayee(actualSyncId, input.payee_name);
+		const payeeId = transferPayeeId ?? await this.resolveOrCreatePayee(actualSyncId, input.payee_name);
+		const categoryId = await this.resolveCategoryId(actualSyncId, input.category_name);
 
 		const formattedNotes = this.formatNotes(
 			input.notes,
@@ -239,6 +274,7 @@ class ActualService {
 
 		if (!actualTxId || actualTxId === 'ok') {
 			const correlated = await this.findTransactionByCorrelation(
+				actualSyncId,
 				input.account_name,
 				input.expense_id,
 				input.idempotency_key,
@@ -256,19 +292,19 @@ class ActualService {
 		return { actual_transaction_id: actualTxId };
 	}
 
-	public async updateTransaction(actualTxId: string, input: Partial<ActualTransactionInput>): Promise<void> {
-		await this.ensureConnected();
+	public async updateTransaction(actualSyncId: string, actualTxId: string, input: Partial<ActualTransactionInput>): Promise<void> {
+		await this.ensureConnected(actualSyncId);
 
 		const payload: any = {};
 
 		if (input.account_name !== undefined) {
-			payload.account = await this.resolveAccountId(input.account_name);
+			payload.account = await this.resolveAccountId(actualSyncId, input.account_name);
 		}
 		if (input.payee_name !== undefined) {
-			payload.payee = await this.resolveOrCreatePayee(input.payee_name);
+			payload.payee = await this.resolveOrCreatePayee(actualSyncId, input.payee_name);
 		}
 		if (input.category_name !== undefined) {
-			payload.category = await this.resolveCategoryId(input.category_name);
+			payload.category = await this.resolveCategoryId(actualSyncId, input.category_name);
 		}
 		if (input.amount !== undefined) {
 			payload.amount = -Math.abs(Math.round(input.amount * 100));
@@ -287,21 +323,22 @@ class ActualService {
 		await (actualApi as any).updateTransaction(actualTxId, payload);
 	}
 
-	public async deleteTransaction(actualTxId: string): Promise<void> {
-		await this.ensureConnected();
+	public async deleteTransaction(actualSyncId: string, actualTxId: string): Promise<void> {
+		await this.ensureConnected(actualSyncId);
 		await (actualApi as any).deleteTransaction(actualTxId);
 	}
 
 	public async findTransactionByCorrelation(
+		actualSyncId: string,
 		paymentMethodName: string,
 		expenseId: string,
 		idempotencyKey: string,
 		expenseDate?: string
 	): Promise<{ id: string; notes?: string } | null> {
-		await this.ensureConnected();
+		await this.ensureConnected(actualSyncId);
 
 		try {
-			const accountId = await this.resolveAccountId(paymentMethodName);
+			const accountId = await this.resolveAccountId(actualSyncId, paymentMethodName);
 			let startDate: string | undefined = undefined;
 			let endDate: string | undefined = undefined;
 
@@ -337,11 +374,14 @@ class ActualService {
 
 	public async syncMasterDataToSupabase(
 		client: SupabaseClient<Database>,
-		userId: string
+		userId: string,
+		actualSyncId: string
 	): Promise<MasterDataSyncReport> {
-		await this.ensureConnected();
-
-		await actualApi.downloadBudget(config.actualSyncId);
+		// Force a fresh download (not just ensureConnected) so master data sync always
+		// reflects the latest state of this user's budget, even if it was already active.
+		await this.ensureInitialized();
+		await actualApi.downloadBudget(actualSyncId);
+		this.activeSyncId = actualSyncId;
 
 		const actualAccounts: ActualAccount[] = await actualApi.getAccounts();
 		const activeAccounts = actualAccounts.filter((a) => !a.closed);

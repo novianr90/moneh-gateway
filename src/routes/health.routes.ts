@@ -18,7 +18,8 @@ export const healthRoutes: FastifyPluginAsync = async (fastify) => {
 	fastify.get('/health', healthHandler);
 	fastify.get('/api/health', healthHandler);
 
-	// Gateway configuration endpoints (support both /config and /api/config)
+	// Bare /config kept for legacy/tooling healthchecks. /api/config is owned by
+	// userConfig.routes.ts (authenticated, per-user actualSyncId) - do not re-declare it
+	// here, Fastify throws on duplicate route registration.
 	fastify.get('/config', configHandler);
-	fastify.get('/api/config', configHandler);
 };

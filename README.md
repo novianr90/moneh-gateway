@@ -38,7 +38,9 @@ Google Spreadsheet Sync               Local SQLite Budget Cache
    - One-click import and synchronization of Categories and Accounts from Actual Budget into Supabase with non-destructive soft-activation and deactivation (`is_active = true|false`).
 4. **Feature Flagging (`USE_ACTUAL`):**
    - Toggle Actual Budget ledger synchronization on/off dynamically via environment variable without interrupting standard operations.
-5. **Google Spreadsheet Reporting Sync:**
+5. **Multi-User, Multi-Budget Support:**
+   - One Gateway instance, one Actual Budget host, many users, each pointed at their own budget. Each user's `actual_sync_id` lives in Supabase `users_configurations` (RLS-scoped, self-service via `/api/config`) instead of a single gateway-wide `ACTUAL_SYNC_ID` env var. If `USE_ACTUAL=true` but a user hasn't configured their `actual_sync_id` yet, the Gateway behaves as if Actual sync were disabled for that user and returns a `warning` telling them to set it up.
+6. **Google Spreadsheet Reporting Sync:**
    - Triggers Google Sheets synchronization edge function and fetches audit logs.
 
 ---
@@ -58,9 +60,11 @@ CLIENT_ORIGIN=https://tracker.novianlabs.my.id,http://localhost:3004,http://loca
 USE_ACTUAL=false
 
 # Actual Budget Configuration
+# NOTE: ACTUAL_SYNC_ID is NOT set here anymore. It is per-user, stored in
+# Supabase `users_configurations.actual_sync_id` and managed via /api/config
+# (see "Multi-User, Multi-Budget Support" above and docs/ACTUAL_BUDGET_INTEGRATION.md §11).
 ACTUAL_SERVER_URL=https://budget.novianlabs.my.id
 ACTUAL_PASSWORD=your-actual-password
-ACTUAL_SYNC_ID=your-sync-id
 ACTUAL_DATA_DIR=./budget-data
 
 # Reconciliation Configuration
@@ -102,11 +106,15 @@ MAX_RECONCILIATION_RETRIES=3
 
 ### 🔄 Dual-Sync & Master Data (`/api/sync`)
 * `POST /api/sync/actual/reconcile`: Triggers manual reconciliation engine for Actual Budget.
-* `POST /api/sync/actual/master-data`: Imports & syncs Categories and Accounts from Actual Budget into Supabase with `is_active` updates.
-* `GET /api/sync/actual/status`: Returns Actual Budget sync status counts.
+* `POST /api/sync/actual/master-data`: Imports & syncs Categories and Accounts from Actual Budget into Supabase with `is_active` updates. Fails with `warning`-style error if the user has no `actual_sync_id` configured.
+* `GET /api/sync/actual/status`: Returns Actual Budget sync status counts. Returns `{ enabled: false, warning: "..." }` if `USE_ACTUAL=true` but the user's `actual_sync_id` is blank.
 * `POST /api/sync/spreadsheet/trigger`: Triggers Google Sheets synchronization edge function.
 * `GET /api/sync/logs`: Retrieves recent spreadsheet sync execution logs.
 * `GET /api/sync/cron-jobs`: Retrieves scheduled pg_cron sync jobs.
+
+### ⚙️ User Configuration (`/api/config`)
+* `GET /api/config`: Returns the authenticated user's configuration (`useActual` flag, current `actualSyncId`).
+* `PUT /api/config/actual-sync-id`: Sets/updates the authenticated user's `actual_sync_id` (their personal Actual Budget). Pass `null`/blank to clear it.
 
 ### 🩺 Health (`/api/health`)
 * `GET /api/health`: Server health check status (used by Coolify).

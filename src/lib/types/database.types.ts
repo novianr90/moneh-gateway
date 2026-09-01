@@ -155,6 +155,29 @@ export interface Database {
           created_at?: string
         }
       }
+      users_configurations: {
+        Row: {
+          id: string
+          user_id: string
+          actual_sync_id: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          actual_sync_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          actual_sync_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+      }
     }
     Views: {
       recent_expenses: {

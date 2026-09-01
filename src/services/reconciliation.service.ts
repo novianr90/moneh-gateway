@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, SyncStatus, SyncFailureType } from '../lib/types/database.types.js';
 import { actualService } from './actual.service.js';
+import { userConfigService } from './userConfig.service.js';
 import { config } from '../config/env.js';
 
 export interface ReconciliationReport {
@@ -100,9 +101,28 @@ class ReconciliationService {
 			const { data: categoryList } = await (client.from('categories') as any).select('id, name');
 			const categoryMap = new Map((categoryList || []).map((c: any) => [c.id, c.name]));
 
+			// Per-user actual_sync_id resolution cache, since expenses here span multiple users (issue #2).
+			const syncIdCache = new Map<string, string | null>();
+			const resolveSyncId = async (userId: string): Promise<string | null> => {
+				if (syncIdCache.has(userId)) return syncIdCache.get(userId)!;
+				const syncId = await userConfigService.getActualSyncId(client, userId);
+				syncIdCache.set(userId, syncId);
+				return syncId;
+			};
+
 			// 2. Process each record
 			for (const expense of typedRecords) {
 				try {
+					const actualSyncId = await resolveSyncId(expense.user_id);
+					if (!actualSyncId) {
+						// User has no actual_sync_id configured (or it's blank) - nothing to reconcile against.
+						report.errors.push({
+							expenseId: expense.id,
+							error: 'REC000: Skipped - user has no actual_sync_id configured'
+						});
+						continue;
+					}
+
 					// Case A: Gateway crashed between setting ROLLBACK_PENDING and SYNC_FAILED (§7.3.a)
 					if (expense.sync_status === 'ROLLBACK_PENDING') {
 						await (client
@@ -122,6 +142,7 @@ class ReconciliationService {
 
 					// Case B: Search Actual Budget for existing matching transaction via correlation notes (§7.3.c)
 					const matched = await actualService.findTransactionByCorrelation(
+						actualSyncId,
 						expense.payment_method,
 						expense.id,
 						idempotencyKey,
@@ -164,7 +185,7 @@ class ReconciliationService {
 						// Stale PENDING -> Attempt direct Actual Budget write
 						try {
 							const categoryName = categoryMap.get(expense.category_id) as string | undefined;
-							const txResult = await actualService.createTransaction({
+							const txResult = await actualService.createTransaction(actualSyncId, {
 								expense_id: expense.id,
 								idempotency_key: idempotencyKey,
 								account_name: expense.payment_method,
