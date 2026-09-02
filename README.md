@@ -1,6 +1,6 @@
 # Moneh Gateway (`moneh-gateway`)
 
-A high-performance, resilient **Fastify API Gateway & Financial Orchestrator** for the Personal Expense Tracker ecosystem. It bridges the SvelteKit frontend client (`tracker-moneh`), Supabase PostgreSQL database, Actual Budget financial ledger (`budget.novianlabs.my.id`), and Google Sheets reporting layer.
+A high-performance, resilient **Fastify API Gateway & Financial Orchestrator** for the Personal Expense Tracker ecosystem. It bridges the SvelteKit frontend client (`tracker-moneh`), Supabase PostgreSQL database, Actual Budget financial ledger (`actualbudget.com`), and Google Sheets reporting layer.
 
 ---
 
@@ -63,7 +63,7 @@ USE_ACTUAL=false
 # NOTE: ACTUAL_SYNC_ID is NOT set here anymore. It is per-user, stored in
 # Supabase `users_configurations.actual_sync_id` and managed via /api/config
 # (see "Multi-User, Multi-Budget Support" above and docs/ACTUAL_BUDGET_INTEGRATION.md §11).
-ACTUAL_SERVER_URL=https://budget.novianlabs.my.id
+ACTUAL_SERVER_URL=https://actualbudget.com
 ACTUAL_PASSWORD=your-actual-password
 ACTUAL_DATA_DIR=./budget-data
 
