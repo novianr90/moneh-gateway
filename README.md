@@ -54,7 +54,7 @@ PORT=4000
 HOST=0.0.0.0
 SUPABASE_URL=https://your-project.supabase.co
 PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
-CLIENT_ORIGIN=https://tracker.novianlabs.my.id,http://localhost:3004,http://localhost:5173
+CLIENT_ORIGIN=https://actualbudget.com,http://localhost:3004,http://localhost:5173
 
 # Feature Flag: Set to true when ready to sync with Actual Budget
 USE_ACTUAL=false
