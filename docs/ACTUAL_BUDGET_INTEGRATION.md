@@ -5,7 +5,10 @@
 **Financial System of Record:** Actual Budget (`https://budget.novianlabs.my.id`)  
 **Tracker Operational Store:** Supabase (PostgreSQL)  
 **Orchestrator:** `moneh-gateway` (Fastify)  
-**API Documentation:** [https://actualbudget.org/docs/api/](https://actualbudget.org/docs/api/)
+**API Documentation:** [https://actualbudget.org/docs/api/](https://actualbudget.org/docs/api/)  
+**Base Docs:** [ARCHITECTURE.md](ARCHITECTURE.md), [DATABASE.md](DATABASE.md), [DECISIONS.md](DECISIONS.md), [TECHNICAL-SPECIFICATION.md](TECHNICAL-SPECIFICATION.md)
+
+> This is the deep-dive spec for the Saga dual-write and reconciliation mechanism specifically (also referenced from `tracker-moneh`'s own architecture doc). For the condensed/current picture, start at [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -496,7 +499,7 @@ Reconciliation serves as the safety net for distributed failures occurring outsi
 
 ## 9. Actual Budget SDK Lifecycle Management
 
-`moneh-gateway` manages the connection to Actual Budget using `@actual-app/api` within the Node.js runtime. The SDK holds a **single active budget per process** — there is no built-in multi-tenancy — so as of §11 the gateway initializes the SDK connection once (server URL + password, both still gateway-wide), then downloads/switches the *active budget* per-request based on the authenticated user's `actual_sync_id`:
+`moneh-gateway` manages the connection to Actual Budget using `@actual-app/api` within the Node.js runtime. The SDK holds a **single active budget per process** — there is no built-in multi-tenancy — so (see [Multi-User, Multi-Budget Support](features/multi-user-multi-budget.md)) the gateway initializes the SDK connection once (server URL + password, both still gateway-wide), then downloads/switches the *active budget* per-request based on the authenticated user's `actual_sync_id`:
 
 ```typescript
 import api from '@actual-app/api';
@@ -526,53 +529,14 @@ export async function ensureConnected(actualSyncId: string) {
 
 1. **Verify Actual Budget SDK Capabilities**: Confirm `@actual-app/api` support for transaction `notes` field, `getTransactions()`, and metadata persistence (resolves §7.4 dependency).
 2. **Schema Migration**: Add `actual_transaction_id`, `sync_status`, `sync_failure_type`, `sync_error`, `synced_at`, and `idempotency_key` columns to Supabase `expenses` table.
-3. **Gateway Environment Update**: Add Actual Budget environment variables (`ACTUAL_SERVER_URL`, `ACTUAL_PASSWORD`) to `moneh-gateway/.env`. `ACTUAL_SYNC_ID` is **not** an env var — see §11.
+3. **Gateway Environment Update**: Add Actual Budget environment variables (`ACTUAL_SERVER_URL`, `ACTUAL_PASSWORD`) to `moneh-gateway/.env`. `ACTUAL_SYNC_ID` is **not** an env var — see [Multi-User, Multi-Budget Support](features/multi-user-multi-budget.md).
 4. **Saga & Reconciliation Service Implementation**: Build `actual.service.ts` and `reconciliation.service.ts` in `moneh-gateway`.
 
 ---
 
-## 11. Multi-User, Multi-Budget Support
+## 11. Feature Extensions
 
-> Tracks issue #2. Supersedes the single gateway-wide `ACTUAL_SYNC_ID` model described in §9's original design.
+Additions layered on top of this core spec live in their own docs, each tracking the GitHub issue that introduced it:
 
-### 11.1 Motivation
-
-The original design pinned `ACTUAL_SYNC_ID` as a gateway environment variable, meaning one Gateway instance could only ever write to one Actual Budget. That prevents multiple Tracker users from each having their own budget behind a shared Gateway/Tracker deployment.
-
-### 11.2 Schema
-
-```sql
-CREATE TABLE public.users_configurations (
-    id uuid primary key default gen_random_uuid(),
-    user_id uuid not null references auth.users(id) on delete cascade unique,
-    actual_sync_id text unique,  -- nullable: "not configured yet" is a valid state
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
-);
-```
-
-RLS: each user may `SELECT` / `INSERT` / `UPDATE` only their own row (`auth.uid() = user_id`).
-
-### 11.3 Resolution Rule
-
-For every Actual Budget operation, the Gateway resolves availability per authenticated user (`userConfigService.resolveActualAvailability`) instead of reading a single env var:
-
-| `USE_ACTUAL` (env) | `users_configurations.actual_sync_id` | Result |
-| :--- | :--- | :--- |
-| `false` | — | Actual sync disabled. Same as before — no warning (feature intentionally off). |
-| `true` | blank / not set | Treated **as if `USE_ACTUAL=false`** for that user: expenses still save to Supabase as `PENDING`, no Actual write attempted. Response includes `warning: "Your Actual sync ID is empty. Please set it up on the configuration page."` |
-| `true` | set | Normal Saga dual-write flow (§6), using that user's `actual_sync_id` to resolve the active budget. |
-
-This rule applies uniformly to: expense create/update/delete/retry, payee listing, master-data sync, and sync-status reporting.
-
-### 11.4 Background Reconciliation
-
-The reconciliation engine (§7.3) scans `expenses` across **all** users. It now resolves `actual_sync_id` per `expense.user_id` (cached per cycle) before attempting any Actual Budget lookup/write for that record. Records belonging to a user with no `actual_sync_id` configured are skipped for that cycle (logged, not treated as a failure) rather than erroring.
-
-### 11.5 Configuration API
-
-Users manage their own `actual_sync_id` via:
-- `GET /api/config` — current `useActual` flag + this user's `actualSyncId`.
-- `PUT /api/config/actual-sync-id` — set/clear this user's `actualSyncId`.
-
-The Tracker frontend's "configuration page" (referenced in the warning message) is expected to call these endpoints.
+- [Multi-User, Multi-Budget Support](features/multi-user-multi-budget.md) — issue #2. Per-user `actual_sync_id` instead of a single gateway-wide budget.
+- [Auto-Adjust Bills on Next-Month (Credit Card / Paylater)](features/auto-adjust-bills-credit-card.md) — issue #7. Credit-card transactions bump next month's Bills category budget.
