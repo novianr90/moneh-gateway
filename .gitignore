@@ -6,3 +6,5 @@ budget-data
 !.env.example
 .DS_Store
 *.log
+
+*/.temp/*

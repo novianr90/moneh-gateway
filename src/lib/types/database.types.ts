@@ -138,6 +138,7 @@ export interface Database {
           user_id: string
           name: string
           is_active: boolean
+          is_credit_card: boolean
           created_at: string
         }
         Insert: {
@@ -145,6 +146,7 @@ export interface Database {
           user_id: string
           name: string
           is_active?: boolean
+          is_credit_card?: boolean
           created_at?: string
         }
         Update: {
@@ -152,6 +154,7 @@ export interface Database {
           user_id?: string
           name?: string
           is_active?: boolean
+          is_credit_card?: boolean
           created_at?: string
         }
       }
@@ -160,6 +163,7 @@ export interface Database {
           id: string
           user_id: string
           actual_sync_id: string | null
+          bills_category_id: string | null
           created_at: string
           updated_at: string
         }
@@ -167,6 +171,7 @@ export interface Database {
           id?: string
           user_id: string
           actual_sync_id?: string | null
+          bills_category_id?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -174,6 +179,7 @@ export interface Database {
           id?: string
           user_id?: string
           actual_sync_id?: string | null
+          bills_category_id?: string | null
           created_at?: string
           updated_at?: string
         }

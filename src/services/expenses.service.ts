@@ -56,6 +56,49 @@ export interface ExpenseOperationResult {
 }
 
 export const expenseService = {
+	/**
+	 * Auto-Adjust Bills on Next-Month (issue #7). Best-effort/non-blocking: called after an
+	 * expense has already synced successfully to Actual - a failure here must never fail the
+	 * expense creation, so all errors are swallowed and logged as a warning.
+	 */
+	async adjustBillsBudgetIfCreditCard(
+		client: SupabaseClient<Database>,
+		userId: string,
+		actualSyncId: string,
+		expense: Pick<Expense, 'payment_method' | 'amount' | 'expense_date'>
+	): Promise<void> {
+		try {
+			const { data: paymentMethod } = await (client
+				.from('payment_methods') as any)
+				.select('is_credit_card')
+				.eq('user_id', userId)
+				.eq('name', expense.payment_method)
+				.maybeSingle();
+
+			if (!paymentMethod?.is_credit_card) return;
+
+			const billsCategoryId = await userConfigService.getBillsCategoryId(client, userId);
+			if (!billsCategoryId) return; // Not configured yet - skip silently.
+
+			const { data: billsCategory } = await (client
+				.from('categories') as any)
+				.select('name')
+				.eq('id', billsCategoryId)
+				.maybeSingle();
+
+			if (!billsCategory?.name) return;
+
+			await actualService.adjustNextMonthBudget(
+				actualSyncId,
+				billsCategory.name,
+				expense.amount,
+				expense.expense_date
+			);
+		} catch (e: any) {
+			console.warn('Failed to auto-adjust Bills budget for credit-card expense:', e?.message);
+		}
+	},
+
 	async getExpenses(
 		client: SupabaseClient<Database>,
 		user: User,
@@ -271,6 +314,9 @@ export const expenseService = {
 				notes: insertedExpense.description || undefined
 			});
 
+			// Auto-Adjust Bills on Next-Month (issue #7) - best-effort, non-blocking.
+			await this.adjustBillsBudgetIfCreditCard(client, user.id, actualSyncId, insertedExpense);
+
 			// Option A: Definite Success
 			const { data: syncedRecord, error: updateError } = await (client
 				.from('expenses') as any)
@@ -390,6 +436,9 @@ export const expenseService = {
 				expense_date: existing.expense_date,
 				notes: existing.description || undefined
 			});
+
+			// Auto-Adjust Bills on Next-Month (issue #7) - best-effort, non-blocking.
+			await this.adjustBillsBudgetIfCreditCard(client, existing.user_id, actualSyncId, existing);
 
 			const { data: syncedRecord } = await (client
 				.from('expenses') as any)

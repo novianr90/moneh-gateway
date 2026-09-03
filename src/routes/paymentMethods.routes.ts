@@ -30,6 +30,23 @@ export const paymentMethodRoutes: FastifyPluginAsync = async (fastify) => {
 			}
 		});
 
+		// Update payment method - only is_credit_card is toggleable via this endpoint (issue #7)
+		protectedRoutes.patch<{
+			Params: { id: string };
+			Body: { is_credit_card: boolean };
+		}>('/api/payment-methods/:id', async (request, reply) => {
+			try {
+				const paymentMethod = await paymentMethodService.updatePaymentMethod(
+					request.supabase,
+					request.params.id,
+					{ is_credit_card: request.body.is_credit_card }
+				);
+				return reply.send(paymentMethod);
+			} catch (err: any) {
+				return reply.code(400).send({ error: err.message });
+			}
+		});
+
 		// Delete payment method
 		protectedRoutes.delete<{ Params: { id: string } }>(
 			'/api/payment-methods/:id',
