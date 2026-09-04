@@ -54,6 +54,10 @@ class ActualService {
 	// re-downloading their budget before the operation runs.
 	private activeSyncId: string | null = null;
 	private downloadPromise: Promise<void> | null = null;
+	// Per-actualSyncId serialization for budget read-then-write (issue #7): setBudgetAmount
+	// overwrites an absolute value, so concurrent adjustNextMonthBudget calls for the same
+	// user must not interleave their get/set pair.
+	private budgetMutexes: Map<string, Promise<unknown>> = new Map();
 
 	private async ensureInitialized(): Promise<void> {
 		if (this.initialized) return;
@@ -119,6 +123,63 @@ class ActualService {
 		} finally {
 			this.downloadPromise = null;
 		}
+	}
+
+	private async withBudgetMutex<T>(actualSyncId: string, fn: () => Promise<T>): Promise<T> {
+		const prior = this.budgetMutexes.get(actualSyncId) ?? Promise.resolve();
+		const run = prior.catch(() => undefined).then(fn);
+		this.budgetMutexes.set(actualSyncId, run.catch(() => undefined));
+		return run;
+	}
+
+	private getNextBudgetMonth(expenseDate: string): string {
+		// expense_date is a plain 'YYYY-MM-DD' string; anchor to UTC midnight so shifting the
+		// month never rolls over to a different day because of local timezone offset.
+		const anchor = new Date(`${expenseDate}T00:00:00Z`);
+		anchor.setUTCMonth(anchor.getUTCMonth() + 1);
+		const year = anchor.getUTCFullYear();
+		const month = String(anchor.getUTCMonth() + 1).padStart(2, '0');
+		return `${year}-${month}`;
+	}
+
+	/**
+	 * Increases next month's budgeted amount for `categoryName` by `amount` (issue #7).
+	 * Used when a transaction is created against a credit-card/paylater-flagged account,
+	 * so the upcoming bill payment is already reflected in next month's budget.
+	 * No validation on the resulting value, per spec - works even when current budgeted is 0.
+	 */
+	public async adjustNextMonthBudget(
+		actualSyncId: string,
+		categoryName: string,
+		amount: number,
+		expenseDate: string
+	): Promise<void> {
+		await this.ensureConnected(actualSyncId);
+
+		const categoryId = await this.resolveCategoryId(actualSyncId, categoryName);
+		if (!categoryId) {
+			throw new Error(`ACT008: Bills category '${categoryName}' not found in Actual Budget`);
+		}
+
+		const nextMonth = this.getNextBudgetMonth(expenseDate);
+
+		await this.withBudgetMutex(actualSyncId, () =>
+			actualApi.batchBudgetUpdates(async () => {
+				const budgetMonth = await actualApi.getBudgetMonth(nextMonth);
+
+				let currentBudgeted = 0;
+				for (const group of budgetMonth.categoryGroups || []) {
+					const match = (group.categories || []).find((c: any) => c.id === categoryId);
+					if (match) {
+						currentBudgeted = Number((match as any).budgeted) || 0;
+						break;
+					}
+				}
+
+				const newBudgeted = currentBudgeted + Math.round(amount * 100);
+				await actualApi.setBudgetAmount(nextMonth, categoryId, newBudgeted);
+			})
+		);
 	}
 
 	public formatNotes(notes: string | undefined, expenseId: string, idempotencyKey: string): string {

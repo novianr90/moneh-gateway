@@ -26,6 +26,18 @@ Google Spreadsheet Sync               Local SQLite Budget Cache
 
 ---
 
+## 📚 Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system layers, data mapping, correlation IDs, SDK lifecycle
+- [docs/DATABASE.md](docs/DATABASE.md) — schema, tables, views, RPCs, migration history
+- [docs/DECISIONS.md](docs/DECISIONS.md) — ADR log
+- [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) — directory layout & layer rules
+- [docs/TECHNICAL-SPECIFICATION.md](docs/TECHNICAL-SPECIFICATION.md) — state machine, error catalog, env config
+- [docs/ACTUAL_BUDGET_INTEGRATION.md](docs/ACTUAL_BUDGET_INTEGRATION.md) — full Saga/reconciliation deep-dive
+- [docs/features/](docs/features) — one PRD per feature/issue
+
+---
+
 ## ✨ Core Capabilities
 
 1. **Saga Dual-Write Orchestrator:**
@@ -39,9 +51,11 @@ Google Spreadsheet Sync               Local SQLite Budget Cache
 4. **Feature Flagging (`USE_ACTUAL`):**
    - Toggle Actual Budget ledger synchronization on/off dynamically via environment variable without interrupting standard operations.
 5. **Multi-User, Multi-Budget Support:**
-   - One Gateway instance, one Actual Budget host, many users, each pointed at their own budget. Each user's `actual_sync_id` lives in Supabase `users_configurations` (RLS-scoped, self-service via `/api/config`) instead of a single gateway-wide `ACTUAL_SYNC_ID` env var. If `USE_ACTUAL=true` but a user hasn't configured their `actual_sync_id` yet, the Gateway behaves as if Actual sync were disabled for that user and returns a `warning` telling them to set it up.
+   - One Gateway instance, one Actual Budget host, many users, each pointed at their own budget. Each user's `actual_sync_id` lives in Supabase `users_configurations` (RLS-scoped, self-service via `/api/config`) instead of a single gateway-wide `ACTUAL_SYNC_ID` env var. If `USE_ACTUAL=true` but a user hasn't configured their `actual_sync_id` yet, the Gateway behaves as if Actual sync were disabled for that user and returns a `warning` telling them to set it up. See [docs/features/multi-user-multi-budget.md](docs/features/multi-user-multi-budget.md).
 6. **Google Spreadsheet Reporting Sync:**
    - Triggers Google Sheets synchronization edge function and fetches audit logs.
+7. **Auto-Adjust Bills on Next-Month (Credit Card / Paylater):**
+   - Transactions created against a payment method flagged `is_credit_card = true` automatically increase the user-configured Bills category's budget for the month *after* the expense date. Best-effort — never blocks expense creation. See [docs/features/auto-adjust-bills-credit-card.md](docs/features/auto-adjust-bills-credit-card.md).
 
 ---
 
@@ -62,7 +76,7 @@ USE_ACTUAL=false
 # Actual Budget Configuration
 # NOTE: ACTUAL_SYNC_ID is NOT set here anymore. It is per-user, stored in
 # Supabase `users_configurations.actual_sync_id` and managed via /api/config
-# (see "Multi-User, Multi-Budget Support" above and docs/ACTUAL_BUDGET_INTEGRATION.md §11).
+# (see "Multi-User, Multi-Budget Support" above and docs/features/multi-user-multi-budget.md).
 ACTUAL_SERVER_URL=https://budget.novianlabs.my.id
 ACTUAL_PASSWORD=your-actual-password
 ACTUAL_DATA_DIR=./budget-data
@@ -102,6 +116,7 @@ MAX_RECONCILIATION_RETRIES=3
 ### 💳 Payment Methods (`/api/payment-methods`)
 * `GET /api/payment-methods?active_only=true`: Lists payment methods (accounts).
 * `POST /api/payment-methods`: Creates a custom payment method.
+* `PATCH /api/payment-methods/:id`: Toggles a payment method's `is_credit_card` flag (only field this endpoint updates).
 * `DELETE /api/payment-methods/:id`: Deletes a custom payment method.
 
 ### 🔄 Dual-Sync & Master Data (`/api/sync`)
@@ -113,8 +128,9 @@ MAX_RECONCILIATION_RETRIES=3
 * `GET /api/sync/cron-jobs`: Retrieves scheduled pg_cron sync jobs.
 
 ### ⚙️ User Configuration (`/api/config`)
-* `GET /api/config`: Returns the authenticated user's configuration (`useActual` flag, current `actualSyncId`).
+* `GET /api/config`: Returns the authenticated user's configuration (`useActual` flag, current `actualSyncId`, `billsCategoryId`).
 * `PUT /api/config/actual-sync-id`: Sets/updates the authenticated user's `actual_sync_id` (their personal Actual Budget). Pass `null`/blank to clear it.
+* `PUT /api/config/bills-category`: Sets/updates the authenticated user's `bills_category_id` (the category auto-adjusted for credit-card transactions). Pass `null` to clear it.
 
 ### 🩺 Health (`/api/health`)
 * `GET /api/health`: Server health check status (used by Coolify).

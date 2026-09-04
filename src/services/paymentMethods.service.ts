@@ -34,6 +34,7 @@ export const paymentMethodService = {
 			user_id: 'default',
 			name,
 			is_active: true,
+			is_credit_card: false,
 			created_at: new Date().toISOString()
 		}));
 	},
@@ -73,5 +74,33 @@ export const paymentMethodService = {
 			.eq('id', id);
 
 		if (error) throw error;
+	},
+
+	// Only is_credit_card is updatable here. `name` and `is_active` are one-way synced FROM
+	// Actual Budget (see actualService.syncMasterDataToSupabase) - there is no reverse sync,
+	// so editing them from Supabase would silently drift from the Actual account they mirror.
+	// is_credit_card is a Supabase-only concept (Actual has no such flag), so it's conflict-free.
+	async updatePaymentMethod(
+		client: SupabaseClient<Database>,
+		id: string,
+		updates: { is_credit_card: boolean }
+	): Promise<PaymentMethodItem> {
+		if (id.startsWith('default-')) {
+			throw new Error('Default payment methods cannot be updated directly');
+		}
+
+		if (typeof updates.is_credit_card !== 'boolean') {
+			throw new Error('PM002: is_credit_card must be a boolean');
+		}
+
+		const { data, error } = await (client
+			.from('payment_methods') as any)
+			.update({ is_credit_card: updates.is_credit_card })
+			.eq('id', id)
+			.select()
+			.single();
+
+		if (error) throw error;
+		return data;
 	}
 };
