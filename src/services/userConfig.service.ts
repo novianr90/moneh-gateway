@@ -50,6 +50,30 @@ export const userConfigService = {
 	},
 
 	/**
+	 * Sets/clears the category the user has designated as "Bills" (issue #7).
+	 * A credit-card transaction's amount is added to this category's next-month budget.
+	 */
+	async upsertBillsCategoryId(
+		client: SupabaseClient<Database>,
+		userId: string,
+		billsCategoryId: string | null
+	): Promise<UserConfiguration> {
+		const { data, error } = await (client
+			.from('users_configurations') as any)
+			.upsert({ user_id: userId, bills_category_id: billsCategoryId || null }, { onConflict: 'user_id' })
+			.select()
+			.single();
+
+		if (error) throw error;
+		return data;
+	},
+
+	async getBillsCategoryId(client: SupabaseClient<Database>, userId: string): Promise<string | null> {
+		const configuration = await this.getConfiguration(client, userId);
+		return configuration?.bills_category_id ?? null;
+	},
+
+	/**
 	 * Resolves whether Actual Budget can be used for this user right now.
 	 *
 	 * - USE_ACTUAL=false (env)              -> unavailable, no warning (feature disabled outright).

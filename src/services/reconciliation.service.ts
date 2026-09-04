@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, SyncStatus, SyncFailureType } from '../lib/types/database.types.js';
 import { actualService } from './actual.service.js';
 import { userConfigService } from './userConfig.service.js';
+import { expenseService } from './expenses.service.js';
 import { config } from '../config/env.js';
 
 export interface ReconciliationReport {
@@ -206,6 +207,11 @@ class ReconciliationService {
 									updated_at: new Date().toISOString()
 								})
 								.eq('id', expense.id);
+
+							// Auto-Adjust Bills on Next-Month (issue #7) - only on a genuine new
+							// creation here (not the "matched existing" branch above, which would
+							// double-count an adjustment already applied on the original attempt).
+							await expenseService.adjustBillsBudgetIfCreditCard(client, expense.user_id, actualSyncId, expense);
 
 							report.resolvedSynced++;
 						} catch (writeErr: any) {

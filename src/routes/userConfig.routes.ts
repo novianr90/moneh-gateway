@@ -12,7 +12,8 @@ export const userConfigRoutes: FastifyPluginAsync = async (fastify) => {
 				const configuration = await userConfigService.getConfiguration(request.supabase, request.user!.id);
 				return reply.send({
 					useActual: config.useActual,
-					actualSyncId: configuration?.actual_sync_id ?? null
+					actualSyncId: configuration?.actual_sync_id ?? null,
+					billsCategoryId: configuration?.bills_category_id ?? null
 				});
 			} catch (err: any) {
 				return reply.code(500).send({ error: err.message || 'CFG001: Failed to load configuration' });
@@ -33,6 +34,22 @@ export const userConfigRoutes: FastifyPluginAsync = async (fastify) => {
 				});
 			} catch (err: any) {
 				return reply.code(400).send({ error: err.message || 'CFG002: Failed to update configuration' });
+			}
+		});
+
+		// Set/update the authenticated user's Bills category (issue #7).
+		protectedRoutes.put<{ Body: { billsCategoryId: string | null } }>('/api/config/bills-category', async (request, reply) => {
+			try {
+				const configuration = await userConfigService.upsertBillsCategoryId(
+					request.supabase,
+					request.user!.id,
+					request.body?.billsCategoryId ?? null
+				);
+				return reply.send({
+					billsCategoryId: configuration.bills_category_id
+				});
+			} catch (err: any) {
+				return reply.code(400).send({ error: err.message || 'CFG003: Failed to update bills category' });
 			}
 		});
 	});
